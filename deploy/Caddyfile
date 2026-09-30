@@ -1,0 +1,32 @@
+{
+    admin off
+    default_sni 129.204.35.13
+    servers {
+        protocols h1 h2
+    }
+}
+
+https://129.204.35.13 {
+    tls {
+        issuer acme {
+            dir https://acme-v02.api.letsencrypt.org/directory
+            profile shortlived
+        }
+    }
+    header Strict-Transport-Security "max-age=86400"
+    @panel path /admin /admin/*
+    handle @panel {
+        reverse_proxy 127.0.0.1:8787 {
+            header_up Host 127.0.0.1:8787
+        }
+    }
+    @agent path /v1/relay /v1/invoke
+    handle @agent {
+        reverse_proxy 127.0.0.1:8787 {
+            header_up Host 127.0.0.1:8787
+        }
+    }
+    handle {
+        respond "Not found" 404
+    }
+}

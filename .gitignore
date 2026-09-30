@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+config.json
+state/
+*.sqlite*
+*.db*
+coverage/
+
+__pycache__/
+*.pyc
