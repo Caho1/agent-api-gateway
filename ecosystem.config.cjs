@@ -24,8 +24,10 @@ module.exports = {
       restart_delay: 1000,
       kill_timeout: 12000,
       max_memory_restart: "384M",
-      out_file: "/dev/stdout",
-      error_file: "/dev/stderr",
+      // pm2-runtime streams the log bus to its inherited stdout/stderr. Reopening
+      // /dev/stdout or /dev/stderr as files fails for systemd's journal sockets.
+      out_file: "/dev/null",
+      error_file: "/dev/null",
       merge_logs: true,
       env: {
         NODE_ENV: "production",
