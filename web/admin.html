@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent Gateway · 管理控制台</title>
+    <link rel="stylesheet" href="/admin/style.css" />
+    <script type="module" src="/admin/app.js"></script>
+  </head>
+  <body>
+    <div id="login" class="login-layout">
+      <section class="login-story">
+        <a class="brand" href="/admin"
+          ><span class="brand-mark">✳</span> Agent Gateway</a
+        >
+        <div>
+          <span class="eyebrow">ADMIN WORKSPACE</span>
+          <h1>管理连接、授权<br />与调用额度。</h1>
+          <p>
+            连接供应商，分配有限权限，掌握每一次调用。<br />主密钥留在网关，Agent
+            只拿到它需要的能力。
+          </p>
+          <div class="boundary">
+            <span>01 · 固定适配器</span><span>02 · 最小授权</span
+            ><span>03 · 可撤销额度</span>
+          </div>
+        </div>
+        <small>PRIVATE CONTROL PLANE / V0.2</small>
+      </section>
+      <section class="login-card">
+        <span class="eyebrow">管理控制台</span>
+        <h2>欢迎回来</h2>
+        <p class="muted">以管理员身份登录，管理连接与 Agent 权限。</p>
+        <div id="setup-note" class="notice" hidden>
+          管理员尚未初始化。请通过可信 SSH
+          终端运行安全设置命令，然后重启服务。此页面无法创建管理员。
+        </div>
+        <form id="login-form">
+          <label
+            >账户<input value="admin" disabled autocomplete="username" /></label
+          ><label
+            >密码<input
+              id="password"
+              name="password"
+              type="password"
+              minlength="16"
+              maxlength="256"
+              required
+              autocomplete="current-password"
+              placeholder="输入管理员密码" /></label
+          ><button class="primary full" type="submit">
+            登录控制台 <span>→</span>
+          </button>
+        </form>
+        <p id="login-error" class="error" role="alert"></p>
+        <small class="muted"
+          >请使用可信 HTTPS 或 SSH 隧道访问。会话 30 分钟后到期。</small
+        >
+      </section>
+    </div>
+    <div id="console" class="shell" hidden>
+      <aside class="sidebar">
+        <a class="brand" href="/admin"
+          ><span class="brand-mark">✳</span
+          ><span>Agent<br /><strong>Gateway</strong></span></a
+        ><span class="nav-label">WORKSPACE</span>
+        <nav aria-label="主要导航">
+          <button data-view="overview" class="active">
+            <span>◫</span> 概览</button
+          ><button data-view="connections"><span>⇄</span> 供应商连接</button
+          ><button data-view="grants"><span>⌘</span> Agent 授权</button
+          ><button data-view="audit"><span>≡</span> 审计日志</button>
+        </nav>
+        <div class="sidebar-bottom">
+          <div class="system-status"><i></i> 网关在线 · 本地内核</div>
+          <p>密钥留在服务端<br />每次调用先授权、再预扣额度</p>
+          <button id="logout" class="subtle">退出登录 ↗</button>
+        </div>
+      </aside>
+      <main>
+        <header>
+          <div class="breadcrumbs">
+            Workspace <span>/</span> <strong id="crumb">概览</strong>
+          </div>
+          <div class="operator">
+            <span class="avatar">A</span
+            ><span>admin<small>Administrator</small></span
+            ><button id="logout-mobile" class="subtle">退出</button>
+          </div>
+        </header>
+        <div class="content">
+          <div class="page-heading">
+            <div>
+              <span class="eyebrow" id="page-kicker">CONTROL CENTER</span>
+              <h1 id="page-title">网关概览</h1>
+              <p id="page-description">
+                从连接到调用，所有权限与额度一目了然。
+              </p>
+            </div>
+            <button id="refresh" class="secondary">↻ 刷新</button>
+          </div>
+          <section id="overview" class="view">
+            <div class="metrics">
+              <article>
+                <span>今日调用额度</span><strong id="metric-usage">—</strong
+                ><small id="metric-date">UTC 日额度</small>
+                <div class="meter"><i id="usage-meter"></i></div>
+              </article>
+              <article>
+                <span>供应商连接</span><strong id="metric-connections">0</strong
+                ><small id="metric-ready">尚未配置连接</small>
+              </article>
+              <article>
+                <span>有效 Agent 授权</span><strong id="metric-grants">0</strong
+                ><small>只开放已批准的账户与操作</small>
+              </article>
+              <article>
+                <span>最近调用成功率</span><strong id="metric-success">—</strong
+                ><small>按最近 100 条预留记录计算</small>
+              </article>
+            </div>
+            <div class="overview-grid">
+              <article class="card">
+                <div class="card-heading">
+                  <div>
+                    <h2>连接状态</h2>
+                    <p>已配置的供应商与可用凭证</p>
+                  </div>
+                  <button class="text-button" data-view="connections">
+                    管理连接 →
+                  </button>
+                </div>
+                <div id="overview-connections"></div>
+              </article>
+              <article class="card quota-card">
+                <h2>全局日额度</h2>
+                <p>
+                  每次供应商请求消耗 1 单位，失败与超时仍计入额度。每天按 UTC
+                  重置。
+                </p>
+                <form id="quota-form">
+                  <label
+                    >每日最多调用<input
+                      id="global-limit"
+                      name="globalDailyUnits"
+                      type="number"
+                      min="1"
+                      max="1000000"
+                      required /></label
+                  ><button class="secondary" type="submit">保存额度</button>
+                </form>
+                <small>不等同于供应商余额或货币预算。</small>
+              </article>
+            </div>
+            <article class="card">
+              <div class="card-heading">
+                <div>
+                  <h2>最近的调用</h2>
+                  <p>仅显示脱敏后的最小审计字段。</p>
+                </div>
+                <button class="text-button" data-view="audit">
+                  查看全部 →
+                </button>
+              </div>
+              <div id="recent-audit"></div>
+            </article>
+            <div class="trust-note">
+              <span>◈</span>
+              <p>
+                <strong>信任边界</strong> ·
+                管理员拥有配置和授权权限。请将网关系统身份、状态目录与 Agent
+                的运行环境隔离；同一主机身份下的任意代码执行可绕过这层边界。
+              </p>
+            </div>
+          </section>
+          <section id="connections" class="view" hidden>
+            <div class="section-toolbar">
+              <p>固定 TikHub 只读适配器 · 不接受自定义 URL 或插件</p>
+              <button id="add-connection" class="primary">＋ 新建连接</button>
+            </div>
+            <article class="card"><div id="connection-list"></div></article>
+          </section>
+          <section id="grants" class="view" hidden>
+            <div class="section-toolbar">
+              <p>令牌仅在创建时显示一次；撤销不终止已开始的调用。</p>
+              <button id="add-grant" class="primary">＋ 创建授权</button>
+            </div>
+            <article class="card"><div id="grant-list"></div></article>
+          </section>
+          <section id="audit" class="view" hidden>
+            <div class="notice slim">
+              日志不保存凭证、请求参数或供应商原始响应。reserved
+              表示额度已预留、尚未记录最终结果。
+            </div>
+            <article class="card">
+              <div class="card-heading">
+                <h2>调用审计</h2>
+                <span class="tag">最近 100 条</span>
+              </div>
+              <div id="audit-list"></div>
+            </article>
+            <article class="card">
+              <div class="card-heading">
+                <h2>管理操作</h2>
+                <span class="tag">最近 100 条</span>
+              </div>
+              <div id="admin-audit"></div>
+            </article>
+          </section>
+          <footer>
+            <span>AGENT API GATEWAY</span><span id="updated">等待同步</span>
+          </footer>
+        </div>
+      </main>
+    </div>
+    <dialog id="connection-dialog">
+      <form id="connection-form">
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow">CONNECTION</span>
+            <h2 id="connection-title">新建供应商连接</h2>
+          </div>
+          <button
+            type="button"
+            data-close
+            class="icon-button"
+            aria-label="关闭"
+          >
+            ×
+          </button>
+        </div>
+        <p class="muted">密钥只写入受保护的服务端文件，保存后不回显。</p>
+        <div class="form-grid">
+          <label
+            >连接别名<input
+              name="id"
+              pattern="[a-zA-Z0-9_.-]{1,64}"
+              maxlength="64"
+              placeholder="douyin-main"
+              required /></label
+          ><label
+            >供应商<select name="provider">
+              <option value="tikhub">TikHub · Douyin / 只读</option>
+            </select></label
+          >
+        </div>
+        <label
+          >账户 secUid<input
+            name="secUid"
+            pattern="[a-zA-Z0-9_-]{1,256}"
+            maxlength="256"
+            required
+            placeholder="供应商账户标识" /></label
+        ><label
+          >允许统计的作品 ID<textarea
+            name="postIds"
+            rows="3"
+            placeholder="每行一个作品 ID，或用逗号分隔"
+          ></textarea></label
+        ><label
+          >供应商 API Key <small>编辑时留空以保留现有密钥</small
+          ><input
+            name="apiKey"
+            type="password"
+            maxlength="4096"
+            autocomplete="new-password"
+            placeholder="仅写入，不回显"
+        /></label>
+        <div class="dialog-actions">
+          <button type="button" data-close class="secondary">取消</button
+          ><button class="primary" type="submit">保存连接</button>
+        </div>
+        <p class="error" role="alert"></p>
+      </form>
+    </dialog>
+    <dialog id="grant-dialog">
+      <form id="grant-form">
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow">AGENT CAPABILITY</span>
+            <h2>创建 Agent 授权</h2>
+          </div>
+          <button
+            type="button"
+            data-close
+            class="icon-button"
+            aria-label="关闭"
+          >
+            ×
+          </button>
+        </div>
+        <label
+          >Agent 授权 ID<input
+            name="id"
+            pattern="[a-zA-Z0-9_.-]{1,64}"
+            maxlength="64"
+            placeholder="research-agent"
+            required
+        /></label>
+        <fieldset>
+          <legend>允许访问的连接</legend>
+          <div id="grant-accounts" class="checkboxes"></div>
+        </fieldset>
+        <fieldset>
+          <legend>允许的操作</legend>
+          <div id="grant-operations" class="checkboxes"></div>
+        </fieldset>
+        <label
+          >到期时间（浏览器本地时区）<input
+            name="expiresAt"
+            type="datetime-local"
+            required
+        /></label>
+        <div class="form-grid">
+          <label
+            >日额度<input
+              name="dailyUnits"
+              type="number"
+              min="1"
+              max="1000000"
+              value="100"
+              required /></label
+          ><label
+            >总额度<input
+              name="totalUnits"
+              type="number"
+              min="1"
+              max="1000000000"
+              value="1000"
+              required
+          /></label>
+        </div>
+        <div class="notice slim">
+          授予列表权限会开放该账户的内容列表；作品白名单约束统计操作。令牌持有人可在期限与额度内使用全部选中能力。
+        </div>
+        <div class="dialog-actions">
+          <button type="button" data-close class="secondary">取消</button
+          ><button class="primary" type="submit">创建并显示令牌</button>
+        </div>
+        <p class="error" role="alert"></p>
+      </form>
+    </dialog>
+    <dialog id="token-dialog">
+      <div class="dialog-heading">
+        <div>
+          <span class="eyebrow">SHOWN ONCE</span>
+          <h2>保存 Agent 令牌</h2>
+        </div>
+        <button type="button" data-close class="icon-button" aria-label="关闭">
+          ×
+        </button>
+      </div>
+      <p class="muted">
+        将此令牌交给对应
+        Agent。它不是供应商主密钥。关闭后无法再次查看；遗失时请撤销授权并新建。
+      </p>
+      <label
+        >能力令牌<textarea
+          id="new-token"
+          rows="3"
+          readonly
+          spellcheck="false"
+        ></textarea>
+      </label>
+      <div class="dialog-actions">
+        <button id="copy-token" class="secondary">复制令牌</button
+        ><button data-close class="primary">我已安全保存</button>
+      </div>
+    </dialog>
+    <div id="toast" class="toast" role="status" hidden></div>
+  </body>
+</html>
