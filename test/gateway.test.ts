@@ -1,139 +1,210 @@
 import { request } from "node:http";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { Store, type Grant } from "../src/store.ts";
-import { parseConfig, parseInvocation } from "../src/model.ts";
-import { TikHub } from "../src/provider.ts";
-import { AdapterRegistry } from "../src/registry.ts";
+import {
+  parseConfig,
+  parseInvocation,
+  parseService,
+  type Invocation,
+  type Route,
+} from "../src/model.ts";
+import { Relay } from "../src/relay.ts";
 import { createGateway } from "../src/app.ts";
 const token = "FAKE_TEST_CREDENTIAL_NOT_FOR_USE_01234567890123456789";
+const routes: Route[] = [
+  { methods: ["GET", "POST"], path: "/v1", match: "prefix" },
+];
+const input: Invocation = { service: "mine", method: "GET", path: "/v1/items" };
 const policy = (id = "test", dailyUnits = 3): Grant => ({
+  schemaVersion: 2,
   id,
-  accounts: ["mine"],
-  operations: ["posts.list", "posts.metrics"],
-  expiresAt: Date.now() + 60_000,
+  services: ["mine"],
+  routes,
+  expiresAt: Date.now() + 60000,
   dailyUnits,
   totalUnits: 10,
+  perMinute: 10,
 });
+const service = parseService({ origin: "https://api.example.com", routes });
 const config = parseConfig({
-  accounts: {
-    mine: {
-      provider: "tikhub",
-      settings: { secUid: "mine-sec-uid", postIds: ["123"] },
-    },
-  },
+  schemaVersion: 2,
+  services: { mine: service },
   globalDailyUnits: 5,
 });
-const account = config.accounts.mine!;
-const list = { operation: "posts.list" as const, account: "mine", args: {} };
-const reply = (data: unknown) =>
-  new Response(JSON.stringify({ code: 200, data }), {
-    headers: { "content-type": "application/json" },
-  });
-
-test("strict invocation rejects arbitrary URLs and arguments", () => {
-  assert.deepEqual(parseInvocation(list), list);
+test("strict generic invocation rejects business adapters, absolute paths and unsupported shape", () => {
+  assert.deepEqual(parseInvocation(input), input);
   for (const value of [
-    { ...list, url: "https://evil" },
-    { ...list, args: { url: "https://evil" } },
-    { ...list, operation: "delete" },
-    { ...list, args: { cursor: "https://evil" } },
-    {
-      operation: "posts.metrics",
-      account: "mine",
-      args: { postId: "123", extra: 1 },
+    { operation: "posts.list", account: "mine", args: {} },
+    { ...input, url: "https://evil" },
+    { ...input, path: "https://example.com" },
+    { ...input, path: "//example.com" },
+    { ...input, method: "TRACE" },
+    { ...input, body: {} },
+    { ...input, method: "POST", body: {}, bodyBase64: "eA==" },
+    { ...input, query: { count: 10 } },
+    { ...input, headers: { accept: 2 } },
+  ])
+    assert.throws(() => parseInvocation(value));
+});
+test("legacy configuration is preserved with no inferred service authority", () => {
+  const old = {
+    accounts: {
+      mine: {
+        provider: "tikhub",
+        settings: { secUid: "private", postIds: ["1"] },
+      },
     },
+    globalDailyUnits: 5,
+  };
+  const next = parseConfig(old);
+  assert.equal(next.schemaVersion, 2);
+  assert.equal(Object.keys(next.services).length, 0);
+  assert.deepEqual(next.legacyAccounts, old.accounts);
+  assert.deepEqual(parseConfig(JSON.parse(JSON.stringify(next))), next);
+  assert.throws(() => parseConfig({ ...next, schemaVersion: 3 }));
+  assert.deepEqual(
+    parseService({ origin: "https://api.example.com" }).routes,
+    [],
+  );
+  for (const name of [
+    "Host",
+    "Content-Length",
+    "Connection",
+    "Cookie",
+    "X-Forwarded-For",
   ])
     assert.throws(() =>
-      new AdapterRegistry([new TikHub("FAKE_KEY")]).resolve(
-        parseInvocation(value),
-        account,
-      ),
+      parseService({
+        origin: "https://api.example.com",
+        credential: { type: "header", name },
+      }),
     );
 });
-test("scope, expiry, revocation and quota fail closed", () => {
+test("scope, expiry, revocation, total/daily quota and fail-closed policy", () => {
   const store = new Store(":memory:");
-  store.create(policy(), token);
-  assert.throws(
-    () => store.reserve("bad", "posts.list", "mine", 5, "bad"),
-    /unauthorized/,
-  );
-  assert.throws(
-    () => store.reserve(token, "posts.list", "other", 5, "scope"),
-    /forbidden/,
-  );
-  assert.throws(
-    () =>
-      store.reserve(
-        token,
-        "posts.list",
-        "mine",
-        5,
-        "expiry",
-        Date.now() + 120_000,
-      ),
-    /unauthorized/,
-  );
-  for (let i = 0; i < 3; i++)
-    store.reserve(token, "posts.list", "mine", 5, "r" + i);
-  assert.throws(
-    () => store.reserve(token, "posts.list", "mine", 5, "over"),
-    /quota_exceeded/,
-  );
-  store.revoke("test");
-  assert.throws(
-    () => store.reserve(token, "posts.list", "mine", 5, "revoked"),
-    /unauthorized/,
-  );
-  assert.equal(store.db.prepare("SELECT count(*) AS n FROM audit").get()!.n, 3);
-  store.close();
+  try {
+    store.create(policy(), token);
+    assert.throws(() => store.reserve("bad", input, 5, "bad"), /unauthorized/);
+    assert.throws(
+      () => store.reserve(token, { ...input, service: "other" }, 5, "scope"),
+      /forbidden/,
+    );
+    assert.throws(
+      () => store.reserve(token, { ...input, path: "/v10" }, 5, "path"),
+      /forbidden/,
+    );
+    assert.throws(
+      () => store.reserve(token, { ...input, method: "DELETE" }, 5, "method"),
+      /forbidden/,
+    );
+    assert.throws(
+      () => store.reserve(token, input, 5, "expiry", Date.now() + 120000),
+      /unauthorized/,
+    );
+    for (let i = 0; i < 3; i++) store.reserve(token, input, 5, "r" + i);
+    assert.throws(
+      () => store.reserve(token, input, 5, "over"),
+      /quota_exceeded/,
+    );
+    store.revoke("test");
+    assert.throws(
+      () => store.reserve(token, input, 5, "revoked"),
+      /unauthorized/,
+    );
+    assert.equal(store.audit().length, 3);
+  } finally {
+    store.close();
+  }
 });
-test("durable global and total quota survive restart; daily reset does not reset total", () => {
-  const dir = mkdtempSync(join(tmpdir(), "gateway-"));
-  const path = join(dir, "db");
+test("legacy grants never gain generic authority; malformed policies do not break admin", () => {
+  const store = new Store(":memory:");
+  try {
+    store.db
+      .prepare("INSERT INTO grants(id,token_hash,policy) VALUES(?,?,?)")
+      .run(
+        "old",
+        createHash("sha256").update(token).digest("hex"),
+        JSON.stringify({
+          id: "old",
+          accounts: ["mine"],
+          operations: ["posts.list"],
+          expiresAt: Date.now() + 60000,
+          dailyUnits: 3,
+          totalUnits: 4,
+        }),
+      );
+    assert.throws(
+      () => store.reserve(token, input, 5, "legacy"),
+      /unauthorized/,
+    );
+    assert.equal(store.summary().grants[0]!.status, "migration_required");
+    assert.equal(store.summary().globalUsed, 0);
+    store.db.prepare("UPDATE grants SET policy='invalid' WHERE id='old'").run();
+    assert.equal(store.summary().grants[0]!.status, "migration_required");
+  } finally {
+    store.close();
+  }
+});
+test("rate limiting is atomic and only commits for successful reservations", () => {
+  const store = new Store(":memory:");
+  try {
+    const now = Math.floor(Date.now() / 60000) * 60000 + 1000;
+    store.create({ ...policy(), expiresAt: now + 180000, perMinute: 1 }, token);
+    store.reserve(token, input, 5, "first", now);
+    assert.throws(
+      () => store.reserve(token, input, 5, "fast", now + 1),
+      /rate_exceeded/,
+    );
+    assert.equal(store.summary().globalUsed, 1);
+    store.reserve(token, input, 5, "next", now + 60000);
+    assert.equal(store.summary().grants[0]!.used, 2);
+  } finally {
+    store.close();
+  }
+});
+test("durable quota survives restart and daily reset does not reset total", () => {
+  const dir = mkdtempSync(join(tmpdir(), "relay-store-")),
+    path = join(dir, "db");
   try {
     let store = new Store(path);
-    const p = policy();
-    p.totalUnits = 1;
-    p.expiresAt = Date.now() + 172_800_000;
-    store.create(p, token);
-    store.reserve(token, "posts.list", "mine", 1, "first");
+    store.create(
+      { ...policy(), totalUnits: 1, expiresAt: Date.now() + 172800000 },
+      token,
+    );
+    store.reserve(token, input, 1, "first");
     store.close();
     store = new Store(path);
-    assert.throws(
-      () =>
-        store.reserve(
-          token,
-          "posts.list",
-          "mine",
-          5,
-          "tomorrow",
-          Date.now() + 86_400_000,
-        ),
-      /quota_exceeded/,
-    );
-    store.create(policy("two"), token + "2");
-    assert.throws(
-      () => store.reserve(token + "2", "posts.list", "mine", 1, "global"),
-      /quota_exceeded/,
-    );
-    store.close();
+    try {
+      assert.throws(
+        () => store.reserve(token, input, 5, "tomorrow", Date.now() + 86400000),
+        /quota_exceeded/,
+      );
+      store.create(policy("two"), token + "2");
+      assert.throws(
+        () => store.reserve(token + "2", input, 1, "global"),
+        /quota_exceeded/,
+      );
+    } finally {
+      store.close();
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
-test("concurrent processes cannot overrun quota", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "gateway-"));
-  const path = join(dir, "db");
+test("concurrent processes cannot exceed quota", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "relay-concurrency-")),
+    path = join(dir, "db");
   try {
     const store = new Store(path);
     store.create(policy(), token);
     store.close();
-    const script = `import {Store} from ${JSON.stringify(new URL("../src/store.ts", import.meta.url).href)};const s=new Store(process.argv[1]);try{s.reserve(process.argv[2],'posts.list','mine',50,process.argv[3]);console.log('ok')}catch{console.log('denied')}finally{s.close()}`;
+    const script = `import{Store}from ${JSON.stringify(new URL("../src/store.ts", import.meta.url).href)};const s=new Store(process.argv[1]);try{s.reserve(process.argv[2],${JSON.stringify(input)},50,process.argv[3]);console.log('ok')}catch{console.log('denied')}finally{s.close()}`;
     const results = await Promise.all(
       Array.from(
         { length: 10 },
@@ -148,15 +219,13 @@ test("concurrent processes cannot overrun quota", async () => {
               token,
               String(i),
             ]);
-            let out = "";
-            let err = "";
-            child.stderr.on("data", (x) => (err += x));
+            let out = "",
+              err = "";
             child.stdout.on("data", (x) => (out += x));
+            child.stderr.on("data", (x) => (err += x));
             child.on("error", reject);
             child.on("exit", (code) =>
-              code === 0
-                ? resolve(out.trim())
-                : reject(new Error("child failed: " + err)),
+              code === 0 ? resolve(out.trim()) : reject(new Error(err)),
             );
           }),
       ),
@@ -166,279 +235,162 @@ test("concurrent processes cannot overrun quota", async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
-test("adapter fixed host, safe GET options, ownership and redaction", async () => {
-  const key = "FAKE_PROVIDER_KEY";
-  let called = 0;
-  const provider = new TikHub(key, async (url, options) => {
-    called++;
-    assert.equal(new URL(String(url)).origin, "https://api.tikhub.io");
-    assert.equal(
-      new URL(String(url)).pathname,
-      "/api/v1/douyin/app/v3/fetch_user_post_videos",
-    );
-    assert.equal(options?.redirect, "error");
-    assert.equal(options?.method, "GET");
-    assert.ok(options?.signal);
-    return new Response(
-      '{"code":200,"data":{"aweme_list":[{"aweme_id":7340000000000000001,"desc":"FAKE_PROVIDER_KEY hello","author":{"sec_uid":"mine-sec-uid"}}],"max_cursor":1700000000000}}',
-    );
-  });
-  const result = (await provider.invoke(list, account)) as {
-    posts: { id: string; title: string }[];
-  };
-  assert.equal(called, 1);
-  assert.equal(result.posts[0]!.id, "7340000000000000001");
-  assert.equal(result.posts[0]!.title, "[REDACTED] hello");
-  const foreign = new TikHub(key, async () =>
-    reply({
-      aweme_list: [{ aweme_id: "123", author: { sec_uid: "foreign" } }],
-    }),
-  );
-  await assert.rejects(foreign.invoke(list, account), /upstream_unavailable/);
-});
-test("adapter no retry, sanitized errors, response bound, missing metrics remain null", async () => {
-  let calls = 0;
-  const failure = new TikHub("FAKE_KEY", async () => {
-    calls++;
-    throw new Error("FAKE_KEY secret upstream body");
-  });
-  await assert.rejects(
-    failure.invoke(list, account),
-    /^Error: upstream_unavailable$/,
-  );
-  assert.equal(calls, 1);
-  const large = new TikHub(
-    "FAKE_KEY",
-    async () => new Response("x".repeat(1024 * 1024 + 1)),
-  );
-  await assert.rejects(large.invoke(list, account), /upstream_unavailable/);
-  const metrics = new TikHub("FAKE_KEY", async () =>
-    reply({ statistics_list: [{ aweme_id: "123", play_count: null }] }),
-  );
-  const out = (await metrics.invoke(
-    { operation: "posts.metrics", account: "mine", args: { postId: "123" } },
-    account,
-  )) as { plays: unknown };
-  assert.equal(out.plays, null);
-  await assert.rejects(
-    metrics.invoke(
-      { operation: "posts.metrics", account: "mine", args: { postId: "999" } },
-      account,
-    ),
-    /forbidden/,
-  );
-});
-test("HTTP gate: auth, host, origin, strict scopes; failed upstream consumes quota", async () => {
+test("gateway reserves before transport, returns unnormalized envelope and sanitized failure", async () => {
   const store = new Store(":memory:");
-  store.create(policy("test", 1), token);
+  store.create(policy(), token);
   let calls = 0;
-  const server = createGateway(
-    config,
-    store,
-    new AdapterRegistry([
-      Object.assign(new TikHub("FAKE_KEY"), {
-        invoke: async () => {
-          calls++;
-          throw new Error("FAKE_KEY secret");
-        },
-      }),
-    ]),
-  );
+  const validator = new Relay(() => "");
+  const server = createGateway(config, store, {
+    validate: (i, s) => validator.validate(i, s),
+    invoke: async () => {
+      calls++;
+      assert.equal(store.summary().globalUsed, calls);
+      if (calls === 2) throw new Error("secret remote error");
+      return {
+        status: 200,
+        headers: {},
+        encoding: "json",
+        body: { arbitrary: [1, { foo: "bar" }] },
+        rawBodyBase64: "e30=",
+      };
+    },
+  });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   assert.ok(address && typeof address !== "string");
-  const url = `http://127.0.0.1:${address.port}/v1/invoke`;
-  const send = (body: unknown = list, extra: Record<string, string> = {}) =>
-    fetch(url, {
+  const base = "http://127.0.0.1:" + address.port;
+  const call = (body: unknown, headers: Record<string, string> = {}) =>
+    fetch(base + "/v1/relay", {
       method: "POST",
       headers: {
+        authorization: "Bearer " + token,
         "content-type": "application/json",
-        authorization: `Bearer ${token}`,
-        ...extra,
+        ...headers,
       },
       body: JSON.stringify(body),
     });
   try {
-    assert.equal((await send(list, { authorization: "bad" })).status, 401);
-    assert.equal((await send(list, { origin: "https://evil" })).status, 403);
-    const badHostStatus = await new Promise<number>((resolve, reject) => {
+    assert.equal((await call({ ...input, path: "/blocked" })).status, 403);
+    assert.equal(calls, 0);
+    const first = await call(input);
+    assert.equal(first.status, 200);
+    const data = (await first.json()) as { data: { body: unknown } };
+    assert.deepEqual(data.data.body, { arbitrary: [1, { foo: "bar" }] });
+    const second = await call(input);
+    assert.equal(second.status, 503);
+    assert.ok(!(await second.text()).includes("secret"));
+    assert.equal(
+      (await call(input, { origin: "https://evil.example" })).status,
+      403,
+    );
+    const hostStatus = await new Promise<number>((resolve) => {
       const req = request(
-        url,
-        { method: "POST", headers: { host: "evil.example" } },
+        base + "/healthz",
+        { headers: { Host: "evil.example" } },
         (res) => {
           res.resume();
           resolve(res.statusCode!);
         },
       );
-      req.on("error", reject);
       req.end();
     });
-    assert.equal(badHostStatus, 403);
-    assert.equal(
-      (
-        await send({
-          operation: "posts.metrics",
-          account: "mine",
-          args: { postId: "999" },
-        })
-      ).status,
-      403,
-    );
-    assert.equal(calls, 0);
-    const first = await send();
-    assert.equal(first.status, 503);
-    assert.ok(!(await first.text()).includes("FAKE_KEY"));
-    assert.equal(calls, 1);
-    assert.equal((await send()).status, 429);
-    assert.equal(calls, 1);
-    assert.equal(
-      store.db.prepare("SELECT outcome FROM audit").get()!.outcome,
-      "failed",
-    );
+    assert.equal(hostStatus, 403);
+    assert.equal(store.summary().globalUsed, 2);
+    assert.equal(store.audit().filter((x) => x.outcome === "failed").length, 1);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     store.close();
   }
 });
+test("empty service and grant routes deny by default", () => {
+  const relay = new Relay(() => "");
+  assert.throws(
+    () => relay.validate(input, { ...service, routes: [] }),
+    /forbidden/,
+  );
+  const store = new Store(":memory:");
+  try {
+    store.create({ ...policy(), routes: [] }, token);
+    assert.throws(() => store.reserve(token, input, 5, "empty"), /forbidden/);
+  } finally {
+    store.close();
+  }
+});
 
-test("malformed persisted policy and counters fail closed", () => {
+test("deep relay values cannot crash response serialization", async () => {
   const store = new Store(":memory:");
   store.create(policy(), token);
-  store.db.prepare("UPDATE grants SET policy=?").run(
-    JSON.stringify({
-      id: "test",
-      accounts: ["mine"],
-      operations: ["posts.list"],
+  const server = createGateway(config, store, {
+    validate: () => {},
+    invoke: async () => ({
+      status: 200,
+      headers: {},
+      encoding: "json",
+      body: JSON.parse("[".repeat(10000) + "0" + "]".repeat(10000)),
     }),
-  );
-  assert.throws(
-    () => store.reserve(token, "posts.list", "mine", 5, "corrupt"),
-    /service_unavailable/,
-  );
-  assert.equal(store.db.prepare("SELECT count(*) AS n FROM audit").get()!.n, 0);
-  store.close();
-});
-test("provider registry supports another adapter without modifying policy core", async () => {
-  const otherConfig = parseConfig({
-    accounts: { local: { provider: "example", settings: {} } },
-    globalDailyUnits: 3,
   });
-  let calls = 0;
-  const registry = new AdapterRegistry([
-    {
-      id: "example",
-      operations: ["example.read"],
-      validateAccount: () => {},
-      validate: (input) => {
-        assert.deepEqual(input.args, {});
-      },
-      invoke: async () => {
-        calls++;
-        return { value: "mock only" };
-      },
-    },
-  ]);
-  registry.validateConfig(otherConfig);
-  assert.throws(
-    () =>
-      registry.resolve(
-        { ...list, account: "local" },
-        otherConfig.accounts.local!,
-      ),
-    /forbidden/,
-  );
-  const store = new Store(":memory:");
-  store.create(
-    { ...policy(), accounts: ["local"], operations: ["example.read"] },
-    token,
-  );
-  const server = createGateway(otherConfig, store, registry);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  assert.ok(address && typeof address !== "string");
+  const addr = server.address();
+  assert.ok(addr && typeof addr !== "string");
+  const base = "http://127.0.0.1:" + addr.port;
   try {
-    const response = await fetch(`http://127.0.0.1:${address.port}/v1/invoke`, {
+    const response = await fetch(base + "/v1/relay", {
       method: "POST",
       headers: {
-        authorization: `Bearer ${token}`,
-        "content-type": "application/json; charset=utf-8",
+        authorization: "Bearer " + token,
+        "content-type": "application/json",
       },
-      body: JSON.stringify({
-        operation: "example.read",
-        account: "local",
-        args: {},
-      }),
+      body: JSON.stringify(input),
     });
-    assert.equal(response.status, 200);
-    assert.equal(calls, 1);
-    assert.equal(store.db.prepare("SELECT used FROM grants").get()!.used, 1);
+    assert.equal(response.status, 503);
+    assert.equal((await fetch(base + "/healthz")).status, 200);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     store.close();
   }
 });
-
-test("grant denies unapproved operation before upstream or quota use", () => {
+test("release activation gate blocks mutations and upstream until exact release health passes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "relay-activation-")),
+    marker = join(dir, "ready");
+  const previous = process.env.GATEWAY_ACTIVATION_FILE;
+  process.env.GATEWAY_ACTIVATION_FILE = marker;
   const store = new Store(":memory:");
-  store.create({ ...policy(), operations: ["posts.list"] }, token);
-  assert.throws(
-    () => store.reserve(token, "posts.metrics", "mine", 5, "wrong-tool"),
-    /forbidden/,
-  );
-  assert.equal(store.db.prepare("SELECT used FROM grants").get()!.used, 0);
-  store.close();
-});
-
-test("unsafe exponential numeric IDs fail closed rather than rounding", async () => {
-  const provider = new TikHub(
-    "FAKE_KEY",
-    async () =>
-      new Response(
-        '{"code":200,"data":{"aweme_list":[{"aweme_id":7.340000000000000001e18,"author":{"sec_uid":"mine-sec-uid"}}]}}',
-      ),
-  );
-  await assert.rejects(provider.invoke(list, account), /upstream_unavailable/);
-});
-
-test("non-success provider body and HTTP redirects fail safely", async () => {
-  for (const response of [
-    new Response('{"code":500,"message":"FAKE_KEY"}'),
-    new Response(null, {
-      status: 302,
-      headers: { location: "https://evil.invalid" },
-    }),
-  ]) {
-    const provider = new TikHub("FAKE_KEY", async () => response);
-    await assert.rejects(
-      provider.invoke(list, account),
-      /^Error: upstream_unavailable$/,
-    );
+  store.create(policy(), token);
+  let calls = 0;
+  const server = createGateway(config, store, {
+    validate: () => {},
+    invoke: async () => {
+      calls++;
+      return { status: 200, headers: {}, encoding: "base64", body: "" };
+    },
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const addr = server.address();
+  assert.ok(addr && typeof addr !== "string");
+  const base = "http://127.0.0.1:" + addr.port;
+  const post = (path: string) =>
+    fetch(base + path, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer " + token,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(input),
+    });
+  try {
+    assert.equal((await fetch(base + "/healthz")).status, 200);
+    assert.equal((await post("/v1/relay")).status, 503);
+    assert.equal((await post("/admin/api/login")).status, 503);
+    assert.equal(calls, 0);
+    assert.equal(store.summary().globalUsed, 0);
+    writeFileSync(marker, "");
+    assert.equal((await post("/v1/relay")).status, 200);
+    assert.equal(calls, 1);
+  } finally {
+    if (previous === undefined) delete process.env.GATEWAY_ACTIVATION_FILE;
+    else process.env.GATEWAY_ACTIVATION_FILE = previous;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
-
-test(
-  "provider aborts a stalled request at its timeout",
-  { timeout: 15_000 },
-  async () => {
-    let aborted = false;
-    const provider = new TikHub(
-      "FAKE_KEY",
-      (_url, options) =>
-        new Promise((_resolve, reject) => {
-          options!.signal!.addEventListener(
-            "abort",
-            () => {
-              aborted = true;
-              reject(new Error("aborted"));
-            },
-            { once: true },
-          );
-        }),
-    );
-    await assert.rejects(
-      provider.invoke(list, account),
-      /upstream_unavailable/,
-    );
-    assert.equal(aborted, true);
-  },
-);

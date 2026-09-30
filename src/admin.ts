@@ -5,7 +5,6 @@ import { AdminAuth } from "./admin-auth.ts";
 import { GatewayError, object, validName } from "./model.ts";
 import { validGrant, type Store } from "./store.ts";
 import type { Settings } from "./settings.ts";
-import type { AdapterRegistry } from "./registry.ts";
 const assets = new Map([
   ["/admin", ["admin.html", "text/html; charset=utf-8"]],
   ["/admin/", ["admin.html", "text/html; charset=utf-8"]],
@@ -18,18 +17,15 @@ export class Admin {
   readonly auth: AdminAuth;
   private settings: Settings;
   private store: Store;
-  private registry: AdapterRegistry;
   constructor(
     auth: AdminAuth,
     settings: Settings,
     store: Store,
-    registry: AdapterRegistry,
     origin = "http://127.0.0.1:8787",
   ) {
     this.auth = auth;
     this.settings = settings;
     this.store = store;
-    this.registry = registry;
     const url = new URL(origin);
     if (
       url.origin !== origin ||
@@ -72,10 +68,12 @@ export class Admin {
     };
     for (const [k, v] of Object.entries(headers)) res.setHeader(k, v);
     const send = (status: number, data: unknown) => {
+      const serialized = JSON.stringify(this.settings.redact(data));
+      if (res.destroyed || res.writableEnded) return;
       res.writeHead(status, {
         "content-type": "application/json; charset=utf-8",
       });
-      res.end(JSON.stringify(this.settings.redact(data)));
+      res.end(serialized);
     };
     if (req.headers.origin && req.headers.origin !== this.origin)
       throw new GatewayError(403, "invalid_origin");
@@ -131,7 +129,10 @@ export class Admin {
         csrf: session.csrf,
         expiresAt: session.expiresAt,
         connections: this.settings.connections(),
-        providers: this.registry.catalog(),
+        schemaVersion: 2,
+        migrationRequired: Object.keys(
+          this.settings.config.legacyAccounts ?? {},
+        ),
         ...this.store.summary(),
         globalDailyUnits: this.settings.config.globalDailyUnits,
         audit: this.store.audit(),
@@ -149,7 +150,12 @@ export class Admin {
       );
       send(200, { ok: true });
     } else if (req.url === "/admin/api/connections" && req.method === "POST") {
-      const id = this.settings.saveConnection(await readBody(req));
+      const raw = await readBody(req);
+      if (!object(raw) || !validName(raw.id))
+        throw new GatewayError(400, "invalid_connection");
+      if (Object.hasOwn(this.settings.config.services, raw.id))
+        this.store.revokeService(raw.id);
+      const id = this.settings.saveConnection(raw);
       this.log("connection_saved", id);
       send(200, { ok: true });
     } else if (
@@ -159,9 +165,7 @@ export class Admin {
       const raw = await readBody(req);
       if (!object(raw) || Object.keys(raw).length !== 1 || !validName(raw.id))
         throw new GatewayError(400, "invalid_request");
-      for (const grant of this.store.summary().grants) {
-        if (grant.accounts.includes(raw.id)) this.store.revoke(grant.id);
-      }
+      this.store.revokeService(raw.id);
       this.settings.deleteConnection(raw.id);
       this.log("connection_deleted", raw.id);
       send(200, { ok: true });
@@ -173,39 +177,12 @@ export class Admin {
       const grant = await readBody(req);
       if (
         !validGrant(grant) ||
-        Object.keys(grant).some(
-          (k) =>
-            ![
-              "id",
-              "accounts",
-              "operations",
-              "expiresAt",
-              "dailyUnits",
-              "totalUnits",
-            ].includes(k),
-        ) ||
-        new Set(grant.accounts).size !== grant.accounts.length ||
-        new Set(grant.operations).size !== grant.operations.length ||
-        grant.accounts.length > 100 ||
-        grant.operations.length > 100 ||
         grant.expiresAt <= Date.now() ||
-        grant.expiresAt > Date.now() + 365 * 86_400_000 ||
-        grant.dailyUnits > 1_000_000 ||
-        grant.totalUnits > 1_000_000_000
+        grant.expiresAt > Date.now() + 365 * 86_400_000
       )
         throw new GatewayError(400, "invalid_grant");
-      for (const id of grant.accounts) {
-        const account = Object.hasOwn(this.settings.config.accounts, id)
-          ? this.settings.config.accounts[id]
-          : undefined;
-        const adapter = this.registry
-          .catalog()
-          .find((x) => x.id === account?.provider);
-        if (
-          !account ||
-          !adapter ||
-          !grant.operations.every((x) => adapter.operations.includes(x))
-        )
+      for (const id of grant.services) {
+        if (!Object.hasOwn(this.settings.config.services, id))
           throw new GatewayError(400, "invalid_scope");
       }
       if (

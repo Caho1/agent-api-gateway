@@ -1,5 +1,5 @@
 [Unit]
-Description=Agent API Gateway control plane
+Description=Agent API Gateway (PM2 runtime)
 After=network-online.target
 Wants=network-online.target
 
@@ -11,8 +11,10 @@ StateDirectory=agent-api-gateway
 StateDirectoryMode=0700
 WorkingDirectory=/opt/agent-api-gateway/current
 EnvironmentFile=/etc/agent-api-gateway/gateway.env
+Environment=PM2_HOME=/var/lib/agent-api-gateway/pm2
+Environment=NODE_ENV=production
 ExecStartPre=/opt/gateway-runtime/node-v24.21.0-linux-x64/bin/node /opt/agent-api-gateway/current/dist/initialize.js
-ExecStart=/opt/gateway-runtime/node-v24.21.0-linux-x64/bin/node /opt/agent-api-gateway/current/dist/server.js
+ExecStart=/opt/gateway-runtime/node-v24.21.0-linux-x64/bin/node /opt/agent-api-gateway/current/node_modules/pm2/bin/pm2-runtime start /opt/agent-api-gateway/current/ecosystem.config.cjs
 Restart=on-failure
 RestartSec=5
 UMask=0077
@@ -28,6 +30,8 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 CapabilityBoundingSet=
 MemoryMax=512M
 TasksMax=64
+TimeoutStopSec=20
+KillMode=control-group
 
 [Install]
 WantedBy=multi-user.target

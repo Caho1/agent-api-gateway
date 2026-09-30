@@ -2,7 +2,8 @@ const $ = (selector, root = document) => root.querySelector(selector);
 let state,
   csrf = "",
   activeView = "overview",
-  toastTimer;
+  toastTimer,
+  uiEpoch = 0;
 const names = {
   overview: [
     "概览",
@@ -11,9 +12,9 @@ const names = {
     "CONTROL CENTER",
   ],
   connections: [
-    "供应商连接",
+    "API 服务",
     "连接你的数据",
-    "配置允许访问的账户与作品，主密钥始终留在网关。",
+    "固定服务 Origin、凭证注入和路由边界，按上游文档使用 API。",
     "PROVIDER CONNECTIONS",
   ],
   grants: [
@@ -38,9 +39,10 @@ const messages = {
   invalid_csrf: "会话验证失败，请刷新页面。",
   grant_exists: "此授权 ID 已存在；请使用新的 ID。",
   invalid_grant: "请检查授权范围、额度与到期时间（最长一年）。",
-  invalid_scope: "连接或操作不在已安装适配器的范围内。",
-  invalid_connection: "请检查连接别名、账户标识、作品 ID 与密钥格式。",
+  invalid_scope: "服务或路由不在允许范围内。",
+  invalid_connection: "请检查服务 Origin、路由、请求头与凭证配置。",
   invalid_quota: "日额度须为 1–1,000,000 的整数。",
+  deployment_in_progress: "新版本正在健康检查，请稍后再试。",
   service_unavailable: "操作暂时失败，请稍后重试。",
 };
 function el(tag, text, className) {
@@ -80,6 +82,7 @@ async function api(path, body) {
   return data;
 }
 function showLogin() {
+  uiEpoch++;
   $("#console").hidden = true;
   $("#login").hidden = false;
   csrf = "";
@@ -139,7 +142,7 @@ function renderAudit(root, rows) {
     rows.map((x) => [
       stacked(time(x.time), x.request_id),
       x.grant_id,
-      stacked(x.operation, x.account),
+      stacked(x.method + " " + (x.path ?? "旧版记录"), x.service),
       badge(x.outcome),
     ]),
   );
@@ -166,6 +169,11 @@ function render() {
       ) + "%"
     : "—";
   $("#global-limit").value = limit;
+  $("#migration-note").hidden = !state.migrationRequired.length;
+  $("#migration-note").textContent =
+    "已保留旧版连接：" +
+    state.migrationRequired.join(", ") +
+    "。旧授权无法调用通用中转，请重新配置服务并明确授权。";
   renderAudit($("#recent-audit"), state.audit.slice(0, 5));
   renderAudit($("#audit-list"), state.audit);
   const list = $("#connection-list");
@@ -174,7 +182,7 @@ function render() {
     empty(
       list,
       "创建你的第一个连接",
-      "为 TikHub 账户设置凭证与允许统计的作品 ID，然后创建 Agent 授权。",
+      "配置 HTTPS Origin、凭证与允许路由，然后创建最小范围的 Agent 授权。",
     );
   const connectionRows = state.connections.map((connection) => {
     const actions = el("div", undefined, "connection-actions"),
@@ -196,20 +204,20 @@ function render() {
     };
     actions.append(edit, remove);
     return [
-      stacked(connection.id, connection.settings.secUid),
-      "TikHub · Douyin",
+      stacked(connection.id, connection.origin),
+      connection.credential.type,
       badge(
         connection.credentialConfigured ? "已配置" : "待配置",
         connection.credentialConfigured ? "active" : "warning",
       ),
-      connection.settings.postIds.length + " 项作品",
+      connection.routes.length + " 条路由",
       actions,
     ];
   });
   if (connectionRows.length)
     table(
       list,
-      ["连接 / 账户", "供应商", "凭证", "统计白名单", "操作"],
+      ["服务 / Origin", "注入方式", "凭证", "路由策略", "操作"],
       connectionRows,
     );
   const overview = $("#overview-connections");
@@ -222,14 +230,14 @@ function render() {
   else
     table(
       overview,
-      ["连接", "凭证", "作品"],
+      ["服务", "凭证", "路由"],
       state.connections.map((x) => [
         x.id,
         badge(
           x.credentialConfigured ? "已配置" : "待配置",
           x.credentialConfigured ? "active" : "warning",
         ),
-        x.settings.postIds.length + " 项",
+        x.routes.length + " 条",
       ]),
     );
   const grantRoot = $("#grant-list");
@@ -247,8 +255,8 @@ function render() {
         const scope = el("div");
         scope.append(
           el("strong", grant.id),
-          el("small", grant.accounts.join(", ")),
-          el("small", grant.operations.join(", ")),
+          el("small", grant.services.join(", ")),
+          el("small", formatRoutes(grant.routes)),
         );
         const action = el(
           "button",
@@ -270,9 +278,12 @@ function render() {
         return [
           scope,
           badge(
-            { active: "有效", expired: "已到期", revoked: "已撤销" }[
-              grant.status
-            ],
+            {
+              active: "有效",
+              expired: "已到期",
+              revoked: "已撤销",
+              migration_required: "需重新授权",
+            }[grant.status],
             grant.status,
           ),
           stacked(
@@ -312,7 +323,10 @@ function switchView(view) {
     .forEach((x) => x.classList.toggle("active", x.dataset.view === view));
 }
 async function refresh() {
-  state = await api("state");
+  const epoch = uiEpoch;
+  const next = await api("state");
+  if (epoch !== uiEpoch) return;
+  state = next;
   csrf = state.csrf;
   $("#login").hidden = true;
   $("#console").hidden = false;
@@ -322,6 +336,7 @@ async function refresh() {
 async function submit(form, action) {
   const button = $('button[type="submit"]', form),
     error = $(".error", form);
+  if (button.disabled) return;
   button.disabled = true;
   if (error) error.textContent = "";
   try {
@@ -371,13 +386,19 @@ function openConnection(connection) {
   form.reset();
   $(".error", form).textContent = "";
   $("#connection-title").textContent = connection
-    ? "编辑供应商连接"
-    : "新建供应商连接";
+    ? "编辑API 服务"
+    : "新建API 服务";
   form.elements.id.readOnly = Boolean(connection);
   if (connection) {
     form.elements.id.value = connection.id;
-    form.elements.secUid.value = connection.settings.secUid;
-    form.elements.postIds.value = connection.settings.postIds.join("\n");
+    form.elements.origin.value = connection.origin;
+    form.elements.credentialType.value = connection.credential.type;
+    form.elements.credentialName.value = connection.credential.name ?? "";
+    form.elements.credentialPrefix.value = connection.credential.prefix ?? "";
+    form.elements.routes.value = formatRoutes(connection.routes);
+    form.elements.allowedHeaders.value = connection.allowedHeaders.join(", ");
+    for (const name of ["timeoutMs", "maxRequestBytes", "maxResponseBytes"])
+      form.elements[name].value = connection[name];
   }
   $("#connection-dialog").showModal();
 }
@@ -387,13 +408,26 @@ $("#connection-form").onsubmit = (event) => {
   const form = event.currentTarget;
   submit(form, async () => {
     const values = new FormData(form);
+    const type = values.get("credentialType");
     const body = {
       id: values.get("id"),
-      provider: "tikhub",
-      secUid: values.get("secUid"),
-      postIds: String(values.get("postIds"))
-        .split(/[\s,]+/)
+      origin: values.get("origin"),
+      credential:
+        type === "none"
+          ? { type }
+          : {
+              type,
+              name: values.get("credentialName"),
+              prefix: values.get("credentialPrefix"),
+            },
+      routes: parseRoutes(values.get("routes")),
+      allowedHeaders: String(values.get("allowedHeaders"))
+        .split(",")
+        .map((x) => x.trim().toLowerCase())
         .filter(Boolean),
+      timeoutMs: Number(values.get("timeoutMs")),
+      maxRequestBytes: Number(values.get("maxRequestBytes")),
+      maxResponseBytes: Number(values.get("maxResponseBytes")),
     };
     const key = values.get("apiKey");
     if (key) body.apiKey = key;
@@ -404,6 +438,23 @@ $("#connection-form").onsubmit = (event) => {
     toast("连接已保存");
   });
 };
+function formatRoutes(routes) {
+  return routes
+    .map((x) => x.methods.join(",") + " " + x.match + " " + x.path)
+    .join("\n");
+}
+function parseRoutes(value) {
+  return String(value)
+    .split("\n")
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const match = /^([A-Z,]+) (exact|prefix) (\/\S*)$/.exec(line);
+      if (!match)
+        throw new Error("路由格式：GET,HEAD exact /v1/items（每行一条）");
+      return { methods: match[1].split(","), match: match[2], path: match[3] };
+    });
+}
 function checkbox(root, name, value, label) {
   const node = el("label"),
     input = el("input");
@@ -415,7 +466,7 @@ function checkbox(root, name, value, label) {
 }
 $("#add-grant").onclick = () => {
   if (!state.connections.length) {
-    toast("请先创建供应商连接。");
+    toast("请先创建 API 服务。");
     switchView("connections");
     return;
   }
@@ -423,11 +474,8 @@ $("#add-grant").onclick = () => {
   form.reset();
   $(".error", form).textContent = "";
   $("#grant-accounts").replaceChildren();
-  $("#grant-operations").replaceChildren();
   for (const connection of state.connections)
-    checkbox($("#grant-accounts"), "accounts", connection.id, connection.id);
-  for (const operation of new Set(state.providers.flatMap((x) => x.operations)))
-    checkbox($("#grant-operations"), "operations", operation, operation);
+    checkbox($("#grant-accounts"), "services", connection.id, connection.id);
   const expiry = new Date(Date.now() + 7 * 86400000);
   expiry.setMinutes(expiry.getMinutes() - expiry.getTimezoneOffset());
   form.elements.expiresAt.value = expiry.toISOString().slice(0, 16);
@@ -440,8 +488,10 @@ $("#grant-form").onsubmit = (event) => {
     const values = new FormData(form),
       result = await api("grants", {
         id: values.get("id"),
-        accounts: values.getAll("accounts"),
-        operations: values.getAll("operations"),
+        schemaVersion: 2,
+        services: values.getAll("services"),
+        routes: parseRoutes(values.get("routes")),
+        perMinute: Number(values.get("perMinute")),
         expiresAt: new Date(String(values.get("expiresAt"))).getTime(),
         dailyUnits: Number(values.get("dailyUnits")),
         totalUnits: Number(values.get("totalUnits")),

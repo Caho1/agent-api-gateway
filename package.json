@@ -1,6 +1,6 @@
 {
   "name": "agent-api-gateway",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -15,14 +15,19 @@
     "lint": "eslint .",
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run build",
-    "format": "prettier --write src test web examples/*.mjs *.json *.js README.md docs .github",
-    "format:check": "prettier --check src test web examples/*.mjs *.json *.js README.md docs .github"
+    "format": "prettier --write src test web examples/*.mjs *.json *.js *.cjs README.md docs .github",
+    "format:check": "prettier --check src test web examples/*.mjs *.json *.js *.cjs README.md docs .github"
   },
   "devDependencies": {
+    "@types/jsdom": "30.0.0",
     "@types/node": "^24.0.0",
     "eslint": "^10.11.0",
+    "jsdom": "30.1.1",
     "prettier": "^3.9.9",
     "typescript": "^5.9.0",
     "typescript-eslint": "^8.0.0"
+  },
+  "dependencies": {
+    "pm2": "7.0.4"
   }
 }

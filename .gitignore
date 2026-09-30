@@ -8,3 +8,6 @@ state/
 *.sqlite*
 *.db*
 coverage/
+
+__pycache__/
+*.pyc

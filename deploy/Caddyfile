@@ -20,6 +20,12 @@ https://129.204.35.13 {
             header_up Host 127.0.0.1:8787
         }
     }
+    @agent path /v1/relay /v1/invoke
+    handle @agent {
+        reverse_proxy 127.0.0.1:8787 {
+            header_up Host 127.0.0.1:8787
+        }
+    }
     handle {
         respond "Not found" 404
     }

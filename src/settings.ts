@@ -7,15 +7,15 @@ import {
   chmodSync,
 } from "node:fs";
 import { dirname } from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import {
   GatewayError,
   object,
-  parseConfig,
+  parseService,
   validName,
   type Config,
+  type Service,
 } from "./model.ts";
-import type { AdapterRegistry } from "./registry.ts";
 export function privateWrite(path: string, value: string) {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = path + "." + randomUUID() + ".tmp";
@@ -32,26 +32,27 @@ export class Settings {
   readonly config: Config;
   private configPath: string;
   private secretsPath: string;
-  private registry: AdapterRegistry;
   private fallbackKey: string;
   constructor(
     config: Config,
     configPath: string,
     secretsPath: string,
-    registry: AdapterRegistry,
     fallbackKey = "",
   ) {
     this.config = config;
     this.configPath = configPath;
     this.secretsPath = secretsPath;
-    this.registry = registry;
     this.fallbackKey = fallbackKey;
     try {
       const value: unknown = JSON.parse(readFileSync(secretsPath, "utf8"));
       if (
         !object(value) ||
         !Object.entries(value).every(
-          ([k, v]) => validName(k) && typeof v === "string" && v.length <= 4096,
+          ([k, v]) =>
+            validName(k) &&
+            typeof v === "string" &&
+            v.length <= 4096 &&
+            !/[\r\n]/.test(v),
         )
       )
         throw new Error("Invalid credentials");
@@ -60,8 +61,33 @@ export class Settings {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
   }
+  private binding(id: string, service: Service) {
+    return (
+      "v2." +
+      createHash("sha256")
+        .update(
+          JSON.stringify([
+            id,
+            new URL(service.origin).origin,
+            service.credential.type,
+            service.credential.type === "none"
+              ? ""
+              : service.credential.type === "header"
+                ? service.credential.name.toLowerCase()
+                : service.credential.name,
+            service.credential.type === "none"
+              ? ""
+              : (service.credential.prefix ?? ""),
+          ]),
+        )
+        .digest("base64url")
+    );
+  }
   key(id: string) {
-    return this.keys[id] ?? this.fallbackKey;
+    const service = Object.hasOwn(this.config.services, id)
+      ? this.config.services[id]
+      : undefined;
+    return service ? (this.keys[this.binding(id, service)] ?? "") : "";
   }
   redact(value: unknown): unknown {
     if (typeof value === "string") {
@@ -77,78 +103,72 @@ export class Settings {
     return value;
   }
   connections() {
-    return Object.entries(this.config.accounts).map(([id, account]) => ({
+    return Object.entries(this.config.services).map(([id, service]) => ({
       id,
-      ...account,
-      credentialConfigured: Boolean(this.key(id)),
+      ...service,
+      credentialConfigured:
+        service.credential.type === "none" || Boolean(this.key(id)),
     }));
   }
   saveConnection(raw: unknown) {
     if (
       !object(raw) ||
-      Object.keys(raw).some(
-        (k) => !["id", "provider", "secUid", "postIds", "apiKey"].includes(k),
-      ) ||
       !validName(raw.id) ||
-      raw.provider !== "tikhub" ||
-      typeof raw.secUid !== "string" ||
-      !Array.isArray(raw.postIds) ||
-      raw.postIds.length > 500 ||
       (raw.apiKey !== undefined &&
         (typeof raw.apiKey !== "string" ||
           raw.apiKey.length < 8 ||
           raw.apiKey.length > 4096 ||
-          /[\r\n]/.test(raw.apiKey)))
+          /[^\x20-\x7e]/.test(raw.apiKey)))
     )
       throw new GatewayError(400, "invalid_connection");
-    const id = raw.id;
+    const { id, apiKey, ...definition } = raw;
+    let service;
+    try {
+      service = parseService(definition);
+    } catch {
+      throw new GatewayError(400, "invalid_connection");
+    }
     if (
-      !Object.hasOwn(this.config.accounts, id) &&
-      Object.keys(this.config.accounts).length >= 100
+      !Object.hasOwn(this.config.services, id) &&
+      Object.keys(this.config.services).length >= 100
     )
       throw new GatewayError(400, "connection_limit");
-    const accounts = Object.assign(Object.create(null), this.config.accounts, {
-      [id]: {
-        provider: "tikhub",
-        settings: { secUid: raw.secUid, postIds: raw.postIds },
-      },
+    const services = Object.assign(Object.create(null), this.config.services, {
+      [id]: service,
     });
-    const next = parseConfig({
-      accounts,
-      globalDailyUnits: this.config.globalDailyUnits,
-    });
-    this.registry.validateConfig(next);
-    if (raw.apiKey !== undefined) {
+    const next = { ...this.config, services };
+    if (apiKey !== undefined) {
       const keys = Object.assign(Object.create(null), this.keys, {
-        [id]: raw.apiKey,
+        [this.binding(id, service)]: apiKey,
       });
       privateWrite(this.secretsPath, JSON.stringify(keys));
       this.keys = keys;
     }
     privateWrite(this.configPath, JSON.stringify(next, null, 2));
-    this.config.accounts = next.accounts;
+    this.config.services = services;
     return id;
   }
   deleteConnection(id: string) {
-    if (!validName(id) || !Object.hasOwn(this.config.accounts, id))
+    if (!validName(id) || !Object.hasOwn(this.config.services, id))
       throw new GatewayError(404, "connection_not_found");
-    const accounts = Object.assign(Object.create(null), this.config.accounts);
-    delete accounts[id];
-    const next = { ...this.config, accounts };
-    privateWrite(this.configPath, JSON.stringify(next, null, 2));
-    this.config.accounts = accounts;
-    const keys = Object.assign(Object.create(null), this.keys);
-    delete keys[id];
-    privateWrite(this.secretsPath, JSON.stringify(keys));
-    this.keys = keys;
+    const services = Object.assign(Object.create(null), this.config.services);
+    delete services[id];
+    privateWrite(
+      this.configPath,
+      JSON.stringify({ ...this.config, services }, null, 2),
+    );
+    this.config.services = services;
+    // Historical credential bindings and legacy keys remain private for consistent rollback.
+    // They are unreachable unless config explicitly selects that exact service/origin/injection.
   }
+
   setGlobal(raw: unknown) {
     if (
       !object(raw) ||
       Object.keys(raw).length !== 1 ||
       !Number.isSafeInteger(raw.globalDailyUnits) ||
       Number(raw.globalDailyUnits) < 1 ||
-      Number(raw.globalDailyUnits) > 1_000_000
+      Number(raw.globalDailyUnits) > 1000000
     )
       throw new GatewayError(400, "invalid_quota");
     const next = {

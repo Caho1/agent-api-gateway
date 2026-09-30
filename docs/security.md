@@ -1,41 +1,39 @@
-# 威胁模型与已验证约束
+# Security boundary
 
-## 信任边界
+## Trusted parties
 
-可信：本机操作员、运行网关的 OS 身份、配置、SQLite 文件与主密钥环境。
-不可信：Agent 输入、客户端能力凭证持有人、TikHub 返回的内容、社交媒体正文。
+The administrator, gateway runtime/host, configured HTTPS upstream, TLS trust store and filesystem are trusted. Agent code and request input are untrusted. Run agents under a separate OS identity or host; same-user filesystem/process access bypasses this gateway. The public admin interface is sensitive and requires HTTPS (or an authenticated local SSH tunnel).
 
-攻击目标：窃取主密钥；访问未批准账户/工具/作品；用通用代理进行 SSRF 或平台写操作；无限调用产生费用；借日志/错误回显泄露凭证；并发与重启绕过额度。
+The gateway isolates provider keys and constrains network destinations, methods/routes, request counts and sizes. It does **not** validate business semantics, resource ownership, upstream billing costs or arbitrary URLs/SQL/scripts inside an upstream API request. Do not authorize upstream proxy, URL-fetch, credential-echo, script execution or administrative endpoints for untrusted agents. Each allowed route should receive the least-privilege upstream credential.
 
-## 防护
+## Transport
 
-- 主密钥从服务进程环境或仅写入的受保护凭证文件进入固定 TikHub Authorization 头；从不存入授权表或状态响应
-- 客户端密钥随机 256 位，数据库保存 SHA-256 摘要；管理员密码使用独立 scrypt 摘要，交互 SSH 初始化，短会话与登录节流
-- 授权校验与额度事务在每一次上游请求前执行；过期、撤销、作用域不足、数据库失败均不放行
-- SQLite BEGIN IMMEDIATE，日额度/总额度/全局日额度/预留审计一同提交；日额度按 UTC 重置
-- 当前 TikHub adapter：固定 GET 端点、严格查询参数、禁重定向、上游超时和字节上限；不允许任意 URL/header/method
-- 应用 HTTP 仅 IPv4 loopback，拒绝非 localhost/127.0.0.1 Host；Agent API 拒绝 Origin。管理 API 单独校验精确可信 Origin、会话 cookie 与 CSRF，公开代理仅提供可信 HTTPS 的 /admin
-- 短请求正文、请求/headers 超时；固定错误码；列表文本中完整 provider key 替换为 [REDACTED]
-- 审计只保留请求 UUID、时间、授权 ID、工具、账户别名、reserved/succeeded/failed；不记录 token、参数、原始响应、标题
+Services specify an HTTPS origin, without userinfo, path, query or fragment. Relative paths reject traversal, protocol-relative targets, backslashes, encoded separators/percent nesting, controls and ambiguous segments. Canonical exact/prefix policy matching uses path boundaries.
 
-## 明确的限制
+Every request resolves all available A/AAAA results. A single non-public answer rejects the request; IPv4 private/reserved and IPv6 local, mapped, transition and non-native-global ranges are blocked conservatively. The validated address is supplied to the actual TLS socket lookup. A fresh non-proxy HTTPS Agent prevents environment proxy and pooled-socket bypass. TLS still verifies the configured hostname. Redirects and protocol upgrades fail closed; no retries.
 
-- **本地任意代码执行不在防护范围。** 若 Agent 能读网关环境、修改配置/数据库或运行管理 CLI，它可以绕过网关。请隔离 OS 身份/容器权限并保护目录。不得把同一用户 shell 作为沙箱
-- 配置的作品 ID 由操作员核实归属；供应商的统计端点本身没有账户参数。恶意或错误管理员配置不受防护
-- 列表作品作者字段缺失或不同会 fail closed，可能影响兼容性；这不是已完成的真实账户契约验证
-- Agent 身份为本地 bearer grant；管理面板为独立密码会话。没有 OAuth/OIDC/MCP，窃取能力令牌者可在其作用域和有效期内调用
-- 没有分布式/多机器支持。TLS 终止和 systemd 部署配置见 admin.md；不要绕过 Host/Origin 限制或将应用端口直接公开
-- 暂无完整请求速率/并发限流；额度限制付费尝试，不能独自防止本机 DoS
-- 审计记录授权后已预留的请求；未授权拒绝尚未持久审计。审计不签名、无自动保留期限，数据库会增长
-- 响应内容仍是不可信文本，客户端必须防提示注入；有限字段投影不是完整 DLP，网络/供应商/主机被入侵不在保证范围
-- 崩溃、超时或失败可能已被供应商计费，故不退款。没有供应商余额同步或货币预算硬保证
-- 撤销只影响后续预留，不中断已有请求。主机时钟需要可靠；有权回拨时钟的操作员位于信任边界内
-- 默认错误信息刻意有限；诊断时不能随意开启包含 Authorization 或原始正文的日志
+Only server-approved, non-sensitive caller headers are rebuilt. Host, hop-by-hop, proxy, forwarding, cookie and authorization headers cannot be caller controlled. Header case duplicates and injection-field collisions are rejected. Server credential injection happens last. Query credential collisions are rejected case-insensitively. Request/body/target/header bytes and response bytes are bounded. A single deadline covers DNS, connect and response reads. Compressed responses are rejected rather than decompressed without a bound.
 
-## 测试覆盖
+The relay returns selected benign response headers, never cookies or Location. The whole buffered response and its headers are checked for the injected key and common encoded echoes; a match returns a sanitized failure. This is defense in depth for accidental echoes, **not a proof against a malicious provider inventing arbitrary encodings**. Arbitrary trusted-upstream responses may contain other sensitive information; limit service/grant routes accordingly.
 
-mock-only 自动测试包括：严格输入、账户作用域、期限/撤销、日/总/全局额度、跨进程竞争与重启持久化、固定路由/GET/redirect:error、作者归属、超大响应、无自动重试、错误脱敏、保留大整数 ID、缺失统计不伪造零，以及 HTTP Origin/Host/认证和失败消耗额度。
+## Policy, quota and audit
 
-测试不是外部安全审计，也没有证明真实 API 当前可用、供应商计费精度或生产隔离配置正确。
+Both service and grant policies must allow the HTTP method and canonical route. Empty routes grant no authority. Changing or deleting a service revokes its existing grants before file writes, including failed writes, preventing an old token from inheriting new routing or credentials.
 
-新增 adapter 属于可信服务端代码：核心保证统一授权/预扣账本，不会自动沙箱化插件。单请求、无重试、超时、字节限制和响应投影需要各 adapter 遵守并通过测试。
+Tokens are 256-bit random opaque values stored only as SHA-256 hashes. Expiry, revoke, per-grant total and UTC day limits, global UTC day limits and a fixed UTC-minute window are checked and committed in one SQLite IMMEDIATE transaction before network work. Fixed windows allow a boundary burst of up to twice the minute limit; use a conservative quota. Reserved requests count even when DNS, transport, upstream or response validation fails. There is no automatic refund because upstream billing may already have happened. One unit is one attempted relay call, not money.
+
+Audit stores request ID, grant ID, time, service, method, canonical path, outcome and upstream status. It never intentionally stores query, request/response body, upstream keys or bearer tokens. Do not place secrets in URL paths. Audit is local, not tamper-evident, and requires operator retention/backup management. Rejected requests before reservation do not create billable/audit records; use reverse-proxy access controls for ingress abuse. Quotas are not a distributed multi-host limiter.
+
+## Admin and state
+
+The PR2 scrypt password hash, throttled verification, 30-minute memory sessions, session rotation, HttpOnly/SameSite cookies, exact Origin, timing-safe CSRF check and restrictive CSP remain in place. Browser-origin requests cannot use the relay. Forwarded Host is ignored; the reverse proxy must force the loopback Host. Browser initialization cannot set an admin password.
+
+Private files are written atomically with 0600 mode under private directories. Credentials are separate from config. Admin state never returns keys or token hashes; new grant tokens display once. Back up config, keys, password hash and a consistent SQLite snapshot securely. Never copy secrets into git, logs or a release directory.
+
+Legacy account settings and grant rows are retained. Legacy grants are unusable under the v2 relay. The migration does not generate a token, contact a provider or infer API authority. A later rollback to the old business-adapter release requires a compatibility plan after v2 configuration/grant changes; blindly restoring a stale database can revive access and reset quotas.
+
+## Operational limits
+
+Requires Node 24+ and one PM2 fork instance. Caddy terminates public TLS under its existing separate systemd service. Health checks establish process/config readiness, not paid upstream availability. All repository tests use fakes or local fixtures; no production credential validation or paid API success is claimed. Monitor disk, backups, certificate renewal, proxy rate limiting and upstream account limits independently.
+
+Credential migration note: old provider credentials remain stored for rollback, but generic services never implicitly use legacy ID-based keys. Explicitly enter the key when configuring a v2 service. New keys are bound to the service ID, origin and injection fields, so a partial config write cannot send a new target’s key to the old target. Changing that binding with a blank key leaves the new target unconfigured unless a key was previously saved for that exact binding.

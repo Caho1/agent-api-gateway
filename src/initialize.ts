@@ -7,7 +7,11 @@ if (!existsSync(path)) {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   writeFileSync(
     path,
-    JSON.stringify({ accounts: {}, globalDailyUnits: 1000 }, null, 2),
+    JSON.stringify(
+      { schemaVersion: 2, services: {}, globalDailyUnits: 1000 },
+      null,
+      2,
+    ),
     { flag: "wx", mode: 0o600 },
   );
 }

@@ -2,89 +2,47 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Agent API Gateway",
-    "version": "0.1.0",
-    "description": "Client-neutral local capability gateway. Describes built-in TikHub operations; additional trusted adapters must extend this schema. Bearer grants are local credentials, not OAuth."
+    "version": "0.3.0",
+    "description": "Generic authenticated HTTPS API relay; server-side origins and credentials, scoped service/method/path grants. No provider business adapters."
   },
   "servers": [
     {
-      "url": "http://127.0.0.1:8787"
-    }
-  ],
-  "security": [
-    {
-      "AgentGrant": []
+      "url": "http://127.0.0.1:8787",
+      "description": "Local gateway; production clients use configured HTTPS origin"
     }
   ],
   "paths": {
-    "/v1/invoke": {
+    "/v1/relay": {
       "post": {
-        "operationId": "invokeCapability",
-        "summary": "Invoke one allowed operation; reserves one call unit before upstream work",
+        "operationId": "relay",
+        "security": [
+          {
+            "gatewayBearer": []
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["operation", "account", "args"],
-                "properties": {
-                  "operation": {
-                    "type": "string",
-                    "enum": ["posts.list", "posts.metrics"]
-                  },
-                  "account": {
-                    "type": "string",
-                    "pattern": "^[a-zA-Z0-9_.-]{1,64}$"
-                  },
-                  "args": {
-                    "type": "object"
-                  }
-                },
-                "oneOf": [
-                  {
-                    "properties": {
-                      "operation": {
-                        "const": "posts.list"
-                      },
-                      "args": {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "properties": {
-                          "cursor": {
-                            "type": "string",
-                            "pattern": "^[0-9]{1,20}$"
-                          }
-                        }
-                      }
-                    }
-                  },
-                  {
-                    "properties": {
-                      "operation": {
-                        "const": "posts.metrics"
-                      },
-                      "args": {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "properties": {
-                          "postId": {
-                            "type": "string",
-                            "pattern": "^[0-9]{1,32}$"
-                          }
-                        },
-                        "required": ["postId"]
-                      }
-                    }
-                  }
-                ]
+                "$ref": "#/components/schemas/Invocation"
               }
             }
           }
         },
         "responses": {
+          "200": {
+            "description": "Relayed response. Inspect data.status for upstream errors; no normalization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
           "400": {
-            "description": "Invalid request",
+            "description": "Invalid input",
             "content": {
               "application/json": {
                 "schema": {
@@ -94,7 +52,7 @@
             }
           },
           "401": {
-            "description": "Invalid, expired or revoked grant",
+            "description": "Invalid, expired, revoked or legacy bearer token",
             "content": {
               "application/json": {
                 "schema": {
@@ -104,17 +62,7 @@
             }
           },
           "403": {
-            "description": "Scope, origin, host, operation or account denied",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Unknown route or method",
+            "description": "Service/grant policy denied",
             "content": {
               "application/json": {
                 "schema": {
@@ -124,7 +72,7 @@
             }
           },
           "413": {
-            "description": "Request exceeds 8 KiB",
+            "description": "Request too large",
             "content": {
               "application/json": {
                 "schema": {
@@ -144,7 +92,7 @@
             }
           },
           "429": {
-            "description": "Quota exceeded",
+            "description": "Request quota or minute rate exceeded",
             "content": {
               "application/json": {
                 "schema": {
@@ -154,7 +102,7 @@
             }
           },
           "502": {
-            "description": "Upstream failed; reservation retained",
+            "description": "Unsafe/unavailable upstream or blocked credential echo",
             "content": {
               "application/json": {
                 "schema": {
@@ -164,7 +112,7 @@
             }
           },
           "503": {
-            "description": "Service unavailable; no fail-open",
+            "description": "Local service unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -173,25 +121,25 @@
               }
             }
           },
-          "200": {
-            "description": "Allowlisted adapter result",
+          "504": {
+            "description": "Upstream total deadline exceeded",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "required": ["requestId", "data"],
-                  "properties": {
-                    "requestId": {
-                      "type": "string",
-                      "format": "uuid"
-                    },
-                    "data": {
-                      "type": "object"
-                    }
-                  }
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "Local readiness with schemaVersion and release; no upstream call"
           }
         }
       }
@@ -199,20 +147,109 @@
   },
   "components": {
     "securitySchemes": {
-      "AgentGrant": {
+      "gatewayBearer": {
         "type": "http",
         "scheme": "bearer",
-        "description": "Local grant token, not the provider key or OAuth"
+        "description": "Scoped gateway token; never the upstream credential"
       }
     },
     "schemas": {
+      "Invocation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["service", "method", "path"],
+        "properties": {
+          "service": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9_.-]{1,64}$"
+          },
+          "method": {
+            "type": "string",
+            "enum": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+          },
+          "path": {
+            "type": "string",
+            "maxLength": 8192,
+            "description": "Canonical relative path; no URL, query, fragment, traversal or encoded separators"
+          },
+          "query": {
+            "type": "object",
+            "maxProperties": 100,
+            "additionalProperties": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            }
+          },
+          "headers": {
+            "type": "object",
+            "maxProperties": 30,
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Only service-approved safe headers, never provider credentials"
+          },
+          "body": {},
+          "bodyBase64": {
+            "type": "string",
+            "contentEncoding": "base64",
+            "description": "Exact request bytes; mutually exclusive with body; GET/HEAD cannot carry body"
+          }
+        }
+      },
+      "UpstreamResponse": {
+        "type": "object",
+        "required": ["status", "headers", "encoding", "body"],
+        "properties": {
+          "status": {
+            "type": "integer",
+            "minimum": 200,
+            "maximum": 599
+          },
+          "headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "encoding": {
+            "enum": ["json", "base64"]
+          },
+          "body": {},
+          "rawBodyBase64": {
+            "type": "string",
+            "contentEncoding": "base64",
+            "description": "Exact original bytes for JSON, preserving large integer fidelity"
+          }
+        }
+      },
+      "Envelope": {
+        "type": "object",
+        "required": ["requestId", "data"],
+        "properties": {
+          "requestId": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/UpstreamResponse"
+          }
+        }
+      },
       "Error": {
         "type": "object",
         "required": ["requestId", "error"],
         "properties": {
           "requestId": {
-            "type": "string",
-            "format": "uuid"
+            "type": "string"
           },
           "error": {
             "type": "string"

@@ -1,8 +1,7 @@
 import { readFileSync } from "node:fs";
 import { parseConfig } from "./model.ts";
 import { Store } from "./store.ts";
-import { TikHub } from "./provider.ts";
-import { AdapterRegistry } from "./registry.ts";
+import { Relay } from "./relay.ts";
 import { createGateway } from "./app.ts";
 import { Settings } from "./settings.ts";
 import { AdminAuth } from "./admin-auth.ts";
@@ -15,17 +14,13 @@ try {
   if (!Number.isInteger(port) || port < 1 || port > 65535)
     throw new Error("port");
   const store = new Store(process.env.GATEWAY_DB ?? "./state/gateway.sqlite");
-  const registry: AdapterRegistry = new AdapterRegistry([
-    new TikHub((id): string => settings.key(id)),
-  ]);
-  registry.validateConfig(config);
-  const settings: Settings = new Settings(
+  const settings = new Settings(
     config,
     configPath,
     process.env.GATEWAY_SECRETS ?? "./state/provider-keys.json",
-    registry,
     process.env.TIKHUB_API_KEY ?? "",
   );
+  const relay = new Relay((id): string => settings.key(id));
   const auth = new AdminAuth({
     file: process.env.ADMIN_PASSWORD_HASH_FILE ?? "./state/admin-password.hash",
   });
@@ -33,10 +28,9 @@ try {
     auth,
     settings,
     store,
-    registry,
     process.env.ADMIN_ORIGIN ?? `http://127.0.0.1:${port}`,
   );
-  const server = createGateway(config, store, registry, admin);
+  const server = createGateway(config, store, relay, admin);
   server.listen(port, "127.0.0.1", () =>
     console.log(`Gateway listening on 127.0.0.1:${port}`),
   );
@@ -54,7 +48,7 @@ try {
     );
 } catch {
   console.error(
-    "Gateway startup failed: check local config, database and provider environment",
+    "Gateway startup failed: check local config, database and service environment",
   );
   process.exitCode = 1;
 }

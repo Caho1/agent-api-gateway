@@ -16,15 +16,13 @@ test("connection file failure cannot resurrect a live grant", async () => {
   try {
     const session = await f.login(),
       headers = { cookie: session.cookie, "x-csrf-token": session.csrf };
-    await f.send(
-      "/admin/api/connections",
-      { id: "mine", provider: "tikhub", secUid: "account", postIds: [] },
-      headers,
-    );
+    await f.send("/admin/api/connections", { id: "mine", ...service }, headers);
     const grant = {
       id: "agent",
-      accounts: ["mine"],
-      operations: ["posts.list"],
+      schemaVersion: 2,
+      services: ["mine"],
+      routes,
+      perMinute: 10,
       expiresAt: Date.now() + 60_000,
       dailyUnits: 2,
       totalUnits: 4,
@@ -40,8 +38,7 @@ test("connection file failure cannot resurrect a live grant", async () => {
       503,
     );
     assert.throws(
-      () =>
-        f.store.reserve(token, "posts.list", "mine", 100, "after-file-failure"),
+      () => f.store.reserve(token, input, 100, "after-file-failure"),
       /unauthorized/,
     );
   } finally {
@@ -56,36 +53,51 @@ import {
   readFileSync,
   statSync,
   mkdirSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AdminAuth, passwordHash } from "../src/admin-auth.ts";
 import { Admin } from "../src/admin.ts";
 import { Settings } from "../src/settings.ts";
-import { AdapterRegistry } from "../src/registry.ts";
-import { TikHub } from "../src/provider.ts";
+import { Relay } from "../src/relay.ts";
 import { Store } from "../src/store.ts";
 import { createGateway } from "../src/app.ts";
-import { parseConfig } from "../src/model.ts";
+import {
+  parseConfig,
+  parseService,
+  type Invocation,
+  type Route,
+} from "../src/model.ts";
 const password = "FAKE_LOCAL_TEST_PASSWORD_123";
 const secret = "FAKE_PROVIDER_TEST_KEY_123456789";
+const routes: Route[] = [{ methods: ["GET"], match: "prefix", path: "/v1" }];
+const service = parseService({
+  origin: "https://api.example.com",
+  credential: { type: "header", name: "Authorization", prefix: "Bearer " },
+  routes,
+});
+const input: Invocation = { service: "mine", method: "GET", path: "/v1/items" };
 const origin = "http://127.0.0.1:8787";
 async function fixture(configured = true, publicOrigin = origin) {
   const directory = mkdtempSync(join(tmpdir(), "gateway-admin-"));
-  const config = parseConfig({ accounts: {}, globalDailyUnits: 100 });
-  const registry = new AdapterRegistry([new TikHub(() => secret)]);
+  const config = parseConfig({
+    schemaVersion: 2,
+    services: {},
+    globalDailyUnits: 100,
+  });
+  const relay = new Relay(() => secret);
   const settings = new Settings(
     config,
     join(directory, "config.json"),
     join(directory, "keys.json"),
-    registry,
   );
   const store = new Store(join(directory, "gateway.sqlite"));
   const auth = new AdminAuth(
     configured ? { hash: await passwordHash(password) } : undefined,
   );
-  const admin = new Admin(auth, settings, store, registry, publicOrigin);
-  const server = createGateway(config, store, registry, admin);
+  const admin = new Admin(auth, settings, store, publicOrigin);
+  const server = createGateway(config, store, relay, admin);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   assert.ok(address && typeof address !== "string");
@@ -274,14 +286,7 @@ test("password verification is throttled and malformed hash or unsafe public ori
   const f = await fixture();
   try {
     assert.throws(
-      () =>
-        new Admin(
-          f.auth,
-          f.settings,
-          f.store,
-          new AdapterRegistry([]),
-          "http://129.204.35.13",
-        ),
+      () => new Admin(f.auth, f.settings, f.store, "http://129.204.35.13"),
       /Admin requires/,
     );
     const session = await f.auth.login(password);
@@ -305,9 +310,7 @@ test("connections are write-only; state, audit and errors exclude keys and token
     const headers = { cookie: session.cookie, "x-csrf-token": session.csrf };
     const body = {
       id: "mine",
-      provider: "tikhub",
-      secUid: "safe-account",
-      postIds: ["123"],
+      ...service,
       apiKey: secret,
     };
     assert.equal((await f.send("/admin/api/connections", body)).status, 401);
@@ -326,8 +329,8 @@ test("connections are write-only; state, audit and errors exclude keys and token
     assert.ok(state.includes('"credentialConfigured":true'));
     assert.deepEqual(
       JSON.parse(readFileSync(join(f.directory, "config.json"), "utf8"))
-        .accounts.mine.settings,
-      { secUid: "safe-account", postIds: ["123"] },
+        .services.mine,
+      service,
     );
     assert.ok(
       !readFileSync(join(f.directory, "config.json"), "utf8").includes(secret),
@@ -345,7 +348,7 @@ test("connections are write-only; state, audit and errors exclude keys and token
       (
         await f.send(
           "/admin/api/connections",
-          { ...body, apiKey: undefined, secUid: "edited" },
+          { ...body, apiKey: undefined, timeoutMs: 5000 },
           headers,
         )
       ).status,
@@ -364,15 +367,13 @@ test("grant scope, repeated IDs, quota projection, revocation and deleted connec
   try {
     const session = await f.login();
     const headers = { cookie: session.cookie, "x-csrf-token": session.csrf };
-    await f.send(
-      "/admin/api/connections",
-      { id: "mine", provider: "tikhub", secUid: "account", postIds: ["123"] },
-      headers,
-    );
+    await f.send("/admin/api/connections", { id: "mine", ...service }, headers);
     const grant = {
       id: "agent",
-      accounts: ["mine"],
-      operations: ["posts.list"],
+      schemaVersion: 2,
+      services: ["mine"],
+      routes,
+      perMinute: 10,
       expiresAt: Date.now() + 60_000,
       dailyUnits: 2,
       totalUnits: 4,
@@ -394,7 +395,7 @@ test("grant scope, repeated IDs, quota projection, revocation and deleted connec
       (await f.send("/admin/api/grants", grant, headers)).status,
       409,
     );
-    f.store.reserve(token, "posts.list", "mine", 100, "one");
+    f.store.reserve(token, input, 100, "one");
     f.store.finish("one", true);
     const snapshot = (await (
       await f.send("/admin/api/state", undefined, { cookie: session.cookie })
@@ -412,7 +413,7 @@ test("grant scope, repeated IDs, quota projection, revocation and deleted connec
         200,
       );
     assert.throws(
-      () => f.store.reserve(token, "posts.list", "mine", 100, "revoked"),
+      () => f.store.reserve(token, input, 100, "revoked"),
       /unauthorized/,
     );
     assert.equal(
@@ -424,14 +425,9 @@ test("grant scope, repeated IDs, quota projection, revocation and deleted connec
       await f.send("/admin/api/grants", next, headers)
     ).json()) as { token: string };
     await f.send("/admin/api/connections/delete", { id: "mine" }, headers);
-    await f.send(
-      "/admin/api/connections",
-      { id: "mine", provider: "tikhub", secUid: "another", postIds: [] },
-      headers,
-    );
+    await f.send("/admin/api/connections", { id: "mine", ...service }, headers);
     assert.throws(
-      () =>
-        f.store.reserve(other.token, "posts.list", "mine", 100, "resurrect"),
+      () => f.store.reserve(other.token, input, 100, "resurrect"),
       /unauthorized/,
     );
     const state = await (
@@ -443,34 +439,96 @@ test("grant scope, repeated IDs, quota projection, revocation and deleted connec
     await f.close();
   }
 });
-test("private settings reload preserves identity and only fixed adapter fields", async () => {
+test("private settings reload preserves identity and accepts only generic service fields", async () => {
   const f = await fixture();
   try {
     f.settings.saveConnection({
       id: "mine",
-      provider: "tikhub",
-      secUid: "account",
-      postIds: [],
+      ...service,
       apiKey: secret,
     });
     const reloaded = new Settings(
       f.config,
       join(f.directory, "config.json"),
       join(f.directory, "keys.json"),
-      new AdapterRegistry([new TikHub("FAKE_KEY")]),
     );
     assert.equal(reloaded.key("mine"), secret);
     assert.throws(
       () =>
         reloaded.saveConnection({
           id: "mine",
-          provider: "tikhub",
-          secUid: "account",
-          postIds: [],
+          ...service,
           url: "https://evil",
         }),
       /invalid_connection/,
     );
+  } finally {
+    await f.close();
+  }
+});
+
+test("failed origin/key update cannot pair new key with old origin after restart", async () => {
+  const f = await fixture();
+  try {
+    f.settings.saveConnection({ id: "mine", ...service, apiKey: secret });
+    const before = readFileSync(join(f.directory, "config.json"), "utf8");
+    rmSync(join(f.directory, "config.json"));
+    mkdirSync(join(f.directory, "config.json"));
+    assert.throws(() =>
+      f.settings.saveConnection({
+        id: "mine",
+        ...service,
+        origin: "https://new-provider.example.com",
+        apiKey: "FAKE_NEW_PROVIDER_KEY_12345",
+      }),
+    );
+    assert.equal(f.config.services.mine!.origin, service.origin);
+    assert.equal(f.settings.key("mine"), secret);
+    rmSync(join(f.directory, "config.json"), { recursive: true });
+    writeFileSync(join(f.directory, "config.json"), before, { mode: 0o600 });
+    const reloaded = new Settings(
+      parseConfig(JSON.parse(before)),
+      join(f.directory, "config.json"),
+      join(f.directory, "keys.json"),
+    );
+    assert.equal(reloaded.key("mine"), secret);
+    reloaded.saveConnection({
+      id: "mine",
+      ...service,
+      origin: "https://different-provider.example.com",
+    });
+    assert.equal(reloaded.key("mine"), "");
+  } finally {
+    await f.close();
+  }
+});
+test("legacy provider keys are preserved but never implicitly injected into generic services", async () => {
+  const f = await fixture();
+  try {
+    writeFileSync(
+      join(f.directory, "keys.json"),
+      JSON.stringify({ mine: secret }),
+    );
+    const legacy = parseConfig({
+      accounts: {
+        mine: { provider: "tikhub", settings: { secUid: "legacy" } },
+      },
+      globalDailyUnits: 100,
+    });
+    const settings = new Settings(
+      legacy,
+      join(f.directory, "config.json"),
+      join(f.directory, "keys.json"),
+      secret,
+    );
+    settings.saveConnection({ id: "mine", ...service });
+    assert.equal(settings.key("mine"), "");
+    assert.equal(
+      JSON.parse(readFileSync(join(f.directory, "keys.json"), "utf8")).mine,
+      secret,
+    );
+    settings.saveConnection({ id: "mine", ...service, apiKey: secret });
+    assert.equal(settings.key("mine"), secret);
   } finally {
     await f.close();
   }
