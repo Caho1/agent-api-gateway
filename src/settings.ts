@@ -110,7 +110,7 @@ export class Settings {
         service.credential.type === "none" || Boolean(this.key(id)),
     }));
   }
-  saveConnection(raw: unknown) {
+  saveConnection(raw: unknown, convertLegacy = false) {
     if (
       !object(raw) ||
       !validName(raw.id) ||
@@ -122,6 +122,16 @@ export class Settings {
     )
       throw new GatewayError(400, "invalid_connection");
     const { id, apiKey, ...definition } = raw;
+    const previous = Object.hasOwn(this.config.services, id)
+      ? this.config.services[id]
+      : undefined;
+    if (previous?.access === "routes" && !convertLegacy) {
+      if (definition.access === "service")
+        throw new GatewayError(409, "explicit_migration_required");
+      // Normal key/origin edits preserve old restrictions, even when a simplified client omits them.
+      definition.access = "routes";
+      definition.routes = previous.routes ?? [];
+    }
     let service;
     try {
       service = parseService(definition);
@@ -147,6 +157,19 @@ export class Settings {
     privateWrite(this.configPath, JSON.stringify(next, null, 2));
     this.config.services = services;
     return id;
+  }
+  upgradeConnection(id: string) {
+    const previous = Object.hasOwn(this.config.services, id)
+      ? this.config.services[id]
+      : undefined;
+    if (!previous || previous.access !== "routes")
+      throw new GatewayError(409, "migration_not_required");
+    const definition: Record<string, unknown> = {
+      ...previous,
+      access: "service",
+    };
+    delete definition.routes;
+    return this.saveConnection({ id, ...definition }, true);
   }
   deleteConnection(id: string) {
     if (!validName(id) || !Object.hasOwn(this.config.services, id))

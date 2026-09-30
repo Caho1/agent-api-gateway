@@ -14,7 +14,7 @@ const names = {
   connections: [
     "API 服务",
     "连接你的数据",
-    "固定服务 Origin、凭证注入和路由边界，按上游文档使用 API。",
+    "统一管理上游 Base URL 与 Key，Agent 按原始文档调用。",
     "PROVIDER CONNECTIONS",
   ],
   grants: [
@@ -39,8 +39,11 @@ const messages = {
   invalid_csrf: "会话验证失败，请刷新页面。",
   grant_exists: "此授权 ID 已存在；请使用新的 ID。",
   invalid_grant: "请检查授权范围、额度与到期时间（最长一年）。",
-  invalid_scope: "服务或路由不在允许范围内。",
-  invalid_connection: "请检查服务 Origin、路由、请求头与凭证配置。",
+  invalid_scope: "请先选择已配置的服务。",
+  invalid_connection: "请检查服务 Origin、请求头与凭证配置。",
+  explicit_migration_required:
+    "请使用独立的服务升级操作，普通编辑不会放宽旧限制。",
+  migration_not_required: "该服务无需升级，请刷新页面。",
   invalid_quota: "日额度须为 1–1,000,000 的整数。",
   deployment_in_progress: "新版本正在健康检查，请稍后再试。",
   service_unavailable: "操作暂时失败，请稍后重试。",
@@ -182,7 +185,7 @@ function render() {
     empty(
       list,
       "创建你的第一个连接",
-      "配置 HTTPS Origin、凭证与允许路由，然后创建最小范围的 Agent 授权。",
+      "配置上游 HTTPS Origin 与凭证，再选择允许 Agent 访问的服务。",
     );
   const connectionRows = state.connections.map((connection) => {
     const actions = el("div", undefined, "connection-actions"),
@@ -202,7 +205,31 @@ function render() {
         }
       }
     };
-    actions.append(edit, remove);
+    actions.append(edit);
+    if (connection.access !== "service") {
+      const upgrade = el("button", "切换为服务级访问", "secondary");
+      upgrade.onclick = async () => {
+        if (
+          !confirm(
+            "将 " +
+              connection.id +
+              " 切换为服务级访问？这会移除旧路由/方法限制，并撤销所有引用该服务的授权。新授权可调用该服务的全部上游 API，包括写入和删除。",
+          )
+        )
+          return;
+        upgrade.disabled = true;
+        try {
+          await api("connections/upgrade", { id: connection.id });
+          await refresh();
+          toast("已切换；请重新创建服务级授权。");
+        } catch (error) {
+          toast(error.message, true);
+          upgrade.disabled = false;
+        }
+      };
+      actions.append(upgrade);
+    }
+    actions.append(remove);
     return [
       stacked(connection.id, connection.origin),
       connection.credential.type,
@@ -210,14 +237,14 @@ function render() {
         connection.credentialConfigured ? "已配置" : "待配置",
         connection.credentialConfigured ? "active" : "warning",
       ),
-      connection.routes.length + " 条路由",
+      connection.access === "service" ? "服务级访问" : "旧版限制",
       actions,
     ];
   });
   if (connectionRows.length)
     table(
       list,
-      ["服务 / Origin", "注入方式", "凭证", "路由策略", "操作"],
+      ["服务 / Origin", "注入方式", "凭证", "访问模式", "操作"],
       connectionRows,
     );
   const overview = $("#overview-connections");
@@ -230,14 +257,14 @@ function render() {
   else
     table(
       overview,
-      ["服务", "凭证", "路由"],
+      ["服务", "凭证", "访问模式"],
       state.connections.map((x) => [
         x.id,
         badge(
           x.credentialConfigured ? "已配置" : "待配置",
           x.credentialConfigured ? "active" : "warning",
         ),
-        x.routes.length + " 条",
+        x.access === "service" ? "服务级访问" : "旧版限制",
       ]),
     );
   const grantRoot = $("#grant-list");
@@ -256,7 +283,12 @@ function render() {
         scope.append(
           el("strong", grant.id),
           el("small", grant.services.join(", ")),
-          el("small", formatRoutes(grant.routes)),
+          el(
+            "small",
+            grant.restricted
+              ? "旧版受限授权 · " + formatRoutes(grant.routes ?? [])
+              : "服务级授权 · 按上游文档调用",
+          ),
         );
         const action = el(
           "button",
@@ -389,13 +421,14 @@ function openConnection(connection) {
     ? "编辑API 服务"
     : "新建API 服务";
   form.elements.id.readOnly = Boolean(connection);
+  $("#legacy-service-note").hidden =
+    !connection || connection.access === "service";
   if (connection) {
     form.elements.id.value = connection.id;
     form.elements.origin.value = connection.origin;
     form.elements.credentialType.value = connection.credential.type;
     form.elements.credentialName.value = connection.credential.name ?? "";
     form.elements.credentialPrefix.value = connection.credential.prefix ?? "";
-    form.elements.routes.value = formatRoutes(connection.routes);
     form.elements.allowedHeaders.value = connection.allowedHeaders.join(", ");
     for (const name of ["timeoutMs", "maxRequestBytes", "maxResponseBytes"])
       form.elements[name].value = connection[name];
@@ -420,7 +453,6 @@ $("#connection-form").onsubmit = (event) => {
               name: values.get("credentialName"),
               prefix: values.get("credentialPrefix"),
             },
-      routes: parseRoutes(values.get("routes")),
       allowedHeaders: String(values.get("allowedHeaders"))
         .split(",")
         .map((x) => x.trim().toLowerCase())
@@ -442,18 +474,6 @@ function formatRoutes(routes) {
   return routes
     .map((x) => x.methods.join(",") + " " + x.match + " " + x.path)
     .join("\n");
-}
-function parseRoutes(value) {
-  return String(value)
-    .split("\n")
-    .map((x) => x.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const match = /^([A-Z,]+) (exact|prefix) (\/\S*)$/.exec(line);
-      if (!match)
-        throw new Error("路由格式：GET,HEAD exact /v1/items（每行一条）");
-      return { methods: match[1].split(","), match: match[2], path: match[3] };
-    });
 }
 function checkbox(root, name, value, label) {
   const node = el("label"),
@@ -488,9 +508,8 @@ $("#grant-form").onsubmit = (event) => {
     const values = new FormData(form),
       result = await api("grants", {
         id: values.get("id"),
-        schemaVersion: 2,
+        schemaVersion: 3,
         services: values.getAll("services"),
-        routes: parseRoutes(values.get("routes")),
         perMinute: Number(values.get("perMinute")),
         expiresAt: new Date(String(values.get("expiresAt"))).getTime(),
         dailyUnits: Number(values.get("dailyUnits")),

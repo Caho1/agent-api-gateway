@@ -113,7 +113,7 @@
               </article>
               <article>
                 <span>有效 Agent 授权</span><strong id="metric-grants">0</strong
-                ><small>只开放批准的方法与路径</small>
+                ><small>令牌仅访问选中的服务</small>
               </article>
               <article>
                 <span>最近调用成功率</span><strong id="metric-success">—</strong
@@ -176,7 +176,7 @@
           </section>
           <section id="connections" class="view" hidden>
             <div class="section-toolbar">
-              <p>按上游原始 API 文档调用 · 服务与授权双重路由限制</p>
+              <p>按上游原始 API 文档调用 · 统一 Base URL 与 Key · 按服务鉴权</p>
               <button id="add-connection" class="primary">＋ 新建连接</button>
             </div>
             <article class="card"><div id="connection-list"></div></article>
@@ -241,7 +241,7 @@
               required
           /></label>
           <label
-            >HTTPS Origin<input
+            >上游 Base URL（HTTPS Origin）<input
               name="origin"
               type="url"
               placeholder="https://api.example.com"
@@ -278,48 +278,45 @@
             autocomplete="new-password"
             placeholder="仅写入，不回显"
         /></label>
-        <label
-          >允许的路由 <small>每行：方法 exact|prefix 路径。留空拒绝全部</small
-          ><textarea
-            name="routes"
-            rows="4"
-            spellcheck="false"
-            placeholder="GET,HEAD exact /v1/items&#10;GET prefix /v1/catalog"
-          ></textarea>
-        </label>
-        <label
-          >Agent 可传的请求头 <small>逗号分隔；敏感及代理头禁止</small
-          ><input name="allowedHeaders" value="accept, content-type"
-        /></label>
-        <div class="form-grid">
-          <label
-            >超时（毫秒）<input
-              name="timeoutMs"
-              type="number"
-              min="100"
-              max="30000"
-              value="10000"
-              required
-          /></label>
-          <label
-            >请求体上限（字节）<input
-              name="maxRequestBytes"
-              type="number"
-              min="1"
-              max="1048576"
-              value="262144"
-              required
-          /></label>
-          <label
-            >响应上限（字节）<input
-              name="maxResponseBytes"
-              type="number"
-              min="1"
-              max="8388608"
-              value="1048576"
-              required
-          /></label>
+        <div id="legacy-service-note" class="notice slim" hidden>
+          此服务保留旧版路由限制。普通编辑不会改变限制；如需全服务访问，请在服务列表使用“切换为服务级访问”，并重新授权。
         </div>
+        <details>
+          <summary>高级：请求头与传输限制</summary>
+          <label
+            >Agent 可传的请求头 <small>逗号分隔；敏感及代理头禁止</small
+            ><input name="allowedHeaders" value="accept, content-type"
+          /></label>
+          <div class="form-grid">
+            <label
+              >超时（毫秒）<input
+                name="timeoutMs"
+                type="number"
+                min="100"
+                max="30000"
+                value="10000"
+                required
+            /></label>
+            <label
+              >请求体上限（字节）<input
+                name="maxRequestBytes"
+                type="number"
+                min="1"
+                max="1048576"
+                value="262144"
+                required
+            /></label>
+            <label
+              >响应上限（字节）<input
+                name="maxResponseBytes"
+                type="number"
+                min="1"
+                max="8388608"
+                value="1048576"
+                required
+            /></label>
+          </div>
+        </details>
         <div class="notice slim">
           编辑已有服务会撤销引用该服务的授权。保存后请按新范围重新授权。
         </div>
@@ -359,17 +356,6 @@
           <div id="grant-accounts" class="checkboxes"></div>
         </fieldset>
         <label
-          >允许的路由
-          <small
-            >每行：方法 exact|prefix 路径。与服务策略取交集；留空拒绝全部</small
-          ><textarea
-            name="routes"
-            rows="4"
-            spellcheck="false"
-            placeholder="GET exact /v1/items"
-          ></textarea>
-        </label>
-        <label
           >每分钟请求上限<input
             name="perMinute"
             type="number"
@@ -404,8 +390,8 @@
           /></label>
         </div>
         <div class="notice slim">
-          令牌持有人可在期限与额度内调用所选服务的授权方法与路径。查询与请求体遵循上游
-          API；请谨慎开放有写入能力的路由。
+          令牌持有人可在期限与额度内使用所选服务的全部上游
+          API（包括写入与删除）。路径、参数和请求体遵循上游文档。旧版受限服务仍保留原有限制。
         </div>
         <div class="dialog-actions">
           <button type="button" data-close class="secondary">取消</button

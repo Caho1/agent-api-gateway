@@ -159,6 +159,22 @@ export class Admin {
       this.log("connection_saved", id);
       send(200, { ok: true });
     } else if (
+      req.url === "/admin/api/connections/upgrade" &&
+      req.method === "POST"
+    ) {
+      const raw = await readBody(req);
+      if (!object(raw) || Object.keys(raw).length !== 1 || !validName(raw.id))
+        throw new GatewayError(400, "invalid_request");
+      const existing = Object.hasOwn(this.settings.config.services, raw.id)
+        ? this.settings.config.services[raw.id]
+        : undefined;
+      if (!existing || existing.access !== "routes")
+        throw new GatewayError(409, "migration_not_required");
+      this.store.revokeService(raw.id);
+      this.settings.upgradeConnection(raw.id);
+      this.log("connection_upgraded_to_service_access", raw.id);
+      send(200, { ok: true });
+    } else if (
       req.url === "/admin/api/connections/delete" &&
       req.method === "POST"
     ) {

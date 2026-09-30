@@ -1,11 +1,11 @@
 # Agent API Gateway
 
-A self-hosted, authenticated API relay for agents. The administrator fixes each service's HTTPS origin and credential injection. An agent supplies a service alias, HTTP method, relative path, query and body according to the **original upstream API documentation**. There are no provider business adapters, post-ID settings or response normalizers.
+A self-hosted, authenticated API relay for agents. The administrator fixes each service's HTTPS origin and credential injection. An agent supplies a service alias, HTTP method, relative path, query and body according to the **original upstream API documentation**. New services use service-level authorization: no route or method allowlist configuration is required. There are no provider business adapters, post-ID settings or response normalizers.
 
 ## 安全边界
 
 - Agent 只持有独立、可撤销、到期的网关令牌；上游密钥留在服务器
-- 服务与授权分别定义 HTTP 方法和路由，两者取交集；空路由默认拒绝
+- 统一管理上游 Base URL 与 Key，按服务鉴权；新服务与授权无需填写路由或方法白名单
 - SQLite 事务原子预扣总次数、UTC 日次数及固定窗口每分钟次数；全局日次数另有限制
 - 解析所有 DNS 地址，任一非公网地址即拒绝；经检查的地址绑定实际 TLS 连接，不重新解析、不复用连接、不走环境代理
 - 仅 HTTPS、相对路径；拒绝重定向、路径混淆、危险请求头和凭证字段冲突
@@ -30,7 +30,7 @@ node dist/server.js
 
 打开 `http://127.0.0.1:8787/admin`。密码由可信终端设置，浏览器没有公开初始化入口。不要将 Agent 与网关部署为同一个系统身份。
 
-默认示例配置没有服务或授权，不会发送任何上游请求。通过管理台添加服务，并明确填写允许的路由；保存密钥后只显示是否已配置。编辑已有服务会撤销引用它的授权，以免旧令牌继承新的目标或凭证。
+默认示例配置没有服务或授权，不会发送任何上游请求。通过管理台添加上游服务，再选择哪些 Agent 可以访问；保存密钥后只显示是否已配置。编辑已有服务会撤销引用它的授权，以免旧令牌继承新的目标或凭证。
 
 ## 调用协议
 
@@ -80,7 +80,7 @@ node dist/server.js
     "name": "Authorization",
     "prefix": "Bearer "
   },
-  "routes": [{ "methods": ["GET"], "match": "prefix", "path": "/v1/items" }],
+  "access": "service",
   "allowedHeaders": ["accept", "content-type"],
   "timeoutMs": 10000,
   "maxRequestBytes": 262144,
@@ -90,21 +90,23 @@ node dist/server.js
 
 `credential.type` 可为 `header`、`query`、`none`。凭证字段与调用者字段冲突会拒绝，不会覆盖后放行。`prefix` 只用于公开前缀，例如 `Bearer `，不要在配置中放密钥。
 
-路由 `exact /v1/items` 只允许该路径；`prefix /v1/items` 允许本身及 `/v1/items/...`，不会匹配 `/v1/items-admin`。不使用正则、通配符或完整 URL。所有查询参数和请求体受上游语义约束，网关不会判断其业务含义；不要对不可信 Agent 开放可转发 URL、任意 SQL 或脚本执行类上游接口。
+`access: "service"` 是持久化配置里的全服务访问标记；管理台自动保存它，无需配置路由。Agent 获准访问一个服务后，可以按上游文档调用其路径与方法，包含上游 Key 有权执行的写入和删除。网关不判断参数的业务含义；真正的业务权限请通过上游 Key/OAuth 权限控制。不要把可任意转发 URL、执行代码或管理高风险资源的上游权限交给不可信 Agent。
 
 授权示例见 [管理说明](docs/admin.md)。CLI 保留 `grant POLICY.json`、`revoke ID` 和 `audit LIMIT`，创建令牌是明确的管理员操作。
 
 ## TikHub 只是第一个示例
 
-服务 Origin 为 `https://api.tikhub.io`，凭证注入为 `Authorization: Bearer `。为需要的原始 API 路径分别授权即可，无需代码适配器。
+服务 Origin 为 `https://api.tikhub.io`，凭证注入为 `Authorization: Bearer `。Agent 获得该服务授权后，直接按原始 API 文档调用，无需代码适配器或路由登记。
 
-[Node 示例](examples/node-client.mjs) 和 [Python 示例](examples/python-client.py) 演示直接使用 [TikHub 用户作品 API 文档](https://docs.tikhub.io/186826223e0) 中的方法、路径和参数。示例需管理员先配置相同服务和精确路由，运行可能产生上游费用；本仓库测试全部使用模拟上游。
+[Node 示例](examples/node-client.mjs) 和 [Python 示例](examples/python-client.py) 演示直接使用 [TikHub 用户作品 API 文档](https://docs.tikhub.io/186826223e0) 中的方法、路径和参数。示例需管理员先配置相同服务并授予服务级访问，运行可能产生上游费用；本仓库测试全部使用模拟上游。
 
 ## 升级、PM2 与发布
 
 [部署手册](docs/deployment.md) 包含 PM2 under systemd、首次升级、`publish.sh`、健康检查和失败回滚。应用使用 PM2；Caddy 保持原生 systemd 与自动续证，不由 PM2 接管。
 
-旧版配置在内存中转换为无活动服务的 v2，并保留 `legacyAccounts`；旧版授权、用量、审计、凭证和管理员密码不删除。旧授权不会自动变成通用路由授权。必须由管理员重新配置、明确授权。首次保存会写入 v2 配置；保存后回退 PR2 必须处理语义不兼容，不可盲目恢复旧数据库而重置用量。
+已存在的路由受限服务和 v2 授权继续执行原限制，不自动扩大权限。普通服务编辑、Key 轮换会保留限制并撤销相关令牌。需要升级时，在列表点击独立的“切换为服务级访问”，确认移除限制并撤销旧授权，然后明确创建新的 v3 服务级授权；升级本身不创建令牌或联系上游。历史业务适配器账户仍保存在 `legacyAccounts`，其更早版本的业务授权继续失效。
+
+配置文件仍使用 `schemaVersion: 2`；新服务显式保存 `access: "service"`，旧服务保留 `access: "routes"` 与原策略。缺失访问标记的旧配置按旧版默认拒绝语义读取。新授权策略为 `schemaVersion: 3`，只选择服务，不含 routes。升级后的配置/授权可能不被更旧发行版识别，激活后回滚需先验证兼容性，不能盲目恢复旧数据库而重置用量。
 
 发布脚本只取 `origin/main`，不合并 PR、不自动部署新分支。当前运行版本以 `/healthz` 和部署记录为准，仓库文档不代表已经发布。
 

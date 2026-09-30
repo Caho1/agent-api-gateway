@@ -53,8 +53,20 @@ async function fixture() {
         status = 401;
         result = { error: "admin_unauthorized" };
       }
+    } else if (path === "grants") {
+      result = { token: "FAKE_DISPOSABLE_UI_TOKEN" };
+    } else if (path === "upgrade") {
+      const service = connections.find((x) => x.id === body.id);
+      if (service) {
+        service.access = "service";
+        delete service.routes;
+      }
     } else if (path === "connections") {
-      connections.push({ ...body, credentialConfigured: false });
+      connections.push({
+        ...body,
+        access: "service",
+        credentialConfigured: false,
+      });
     }
     return new Response(JSON.stringify(result), {
       status,
@@ -114,12 +126,10 @@ test("generic management UI login, service form, navigation, cancel and logout",
     assert.ok(f.w.document.querySelector("#connection-dialog[open]"));
     f.input("id").value = "example";
     f.input("origin").value = "https://api.example.com";
-    f.input("routes").value = "GET exact /v1/items";
     await f.submit("#connection-form");
     const saved = f.calls.find((x) => x.path === "connections")!;
-    assert.deepEqual(saved.body.routes, [
-      { methods: ["GET"], match: "exact", path: "/v1/items" },
-    ]);
+    assert.equal(Object.hasOwn(saved.body, "routes"), false);
+    assert.equal(f.w.document.querySelector('[name="routes"]'), null);
     assert.equal(saved.body.origin, "https://api.example.com");
     assert.ok(!Object.hasOwn(saved.body, "postIds"));
     assert.equal(f.w.document.querySelector("#connection-dialog[open]"), null);
@@ -154,33 +164,6 @@ test("generic management UI login, service form, navigation, cancel and logout",
     f.close();
   }
 });
-test("invalid routes stay in form without mutation", async () => {
-  const f = await fixture();
-  try {
-    await f.login();
-    f.w.document.querySelector<HTMLButtonElement>("#add-connection")!.click();
-    f.input("id").value = "example";
-    f.input("origin").value = "https://api.example.com";
-    f.input("routes").value = "https://wrong";
-    await f.submit("#connection-form");
-    assert.ok(f.w.document.querySelector("#connection-dialog[open]"));
-    assert.ok(
-      f.w.document
-        .querySelector("#connection-form .error")!
-        .textContent!.includes("路由格式"),
-    );
-    assert.equal(f.calls.filter((x) => x.path === "connections").length, 0);
-    assert.equal(
-      f.w.document.querySelector<HTMLButtonElement>(
-        '#connection-form [type="submit"]',
-      )!.disabled,
-      false,
-    );
-  } finally {
-    f.close();
-  }
-});
-
 test("repeated service submit is ignored while the first request is pending", async () => {
   const f = await fixture();
   try {
@@ -188,7 +171,6 @@ test("repeated service submit is ignored while the first request is pending", as
     f.w.document.querySelector<HTMLButtonElement>("#add-connection")!.click();
     f.input("id").value = "example";
     f.input("origin").value = "https://api.example.com";
-    f.input("routes").value = "GET exact /v1/items";
     const original = f.w.fetch;
     let release: () => void = () => {};
     const pending = new Promise<void>((resolve) => {
@@ -219,6 +201,104 @@ test("repeated service submit is ignored while the first request is pending", as
     release();
     await f.settle();
     assert.equal(f.calls.filter((x) => x.path === "connections").length, 1);
+  } finally {
+    f.close();
+  }
+});
+
+test("new grant form selects services without route or method configuration", async () => {
+  const f = await fixture();
+  try {
+    f.connections.push({
+      id: "example",
+      origin: "https://api.example.com",
+      access: "service",
+      credential: { type: "none" },
+      allowedHeaders: ["accept"],
+      timeoutMs: 1000,
+      maxRequestBytes: 1000,
+      maxResponseBytes: 1000,
+      credentialConfigured: true,
+    });
+    await f.login();
+    f.w.document.querySelector<HTMLButtonElement>("#add-grant")!.click();
+    const form = f.w.document.querySelector<HTMLFormElement>("#grant-form")!;
+    assert.equal(form.querySelector('[name="routes"]'), null);
+    assert.equal(form.querySelector('[name="methods"]'), null);
+    (form.elements.namedItem("id") as HTMLInputElement).value = "new-agent";
+    form.querySelector<HTMLInputElement>('[name="services"]')!.checked = true;
+    await f.submit("#grant-form");
+    const saved = f.calls.find((x) => x.path === "grants")!;
+    assert.equal(saved.body.schemaVersion, 3);
+    assert.deepEqual(saved.body.services, ["example"]);
+    assert.equal(Object.hasOwn(saved.body, "routes"), false);
+    assert.ok(f.w.document.querySelector("#token-dialog[open]"));
+    f.w.document
+      .querySelector<HTMLButtonElement>("#token-dialog [data-close]")!
+      .click();
+    assert.equal(
+      f.w.document.querySelector<HTMLTextAreaElement>("#new-token")!.value,
+      "",
+    );
+  } finally {
+    f.close();
+  }
+});
+test("legacy service conversion is explicit, cancelable and explains token revocation", async () => {
+  const f = await fixture();
+  try {
+    f.connections.push({
+      id: "legacy",
+      origin: "https://api.example.com",
+      access: "routes",
+      routes: [{ methods: ["GET"], match: "exact", path: "/old" }],
+      credential: { type: "none" },
+      allowedHeaders: ["accept"],
+      timeoutMs: 1000,
+      maxRequestBytes: 1000,
+      maxResponseBytes: 1000,
+      credentialConfigured: true,
+    });
+    await f.login();
+    const button = () =>
+      Array.from(
+        f.w.document.querySelectorAll<HTMLButtonElement>(
+          "#connection-list button",
+        ),
+      ).find((x) => x.textContent === "切换为服务级访问")!;
+    let disclosure = "";
+    f.w.confirm = (message) => {
+      disclosure = String(message);
+      return false;
+    };
+    button().click();
+    await f.settle();
+    assert.match(disclosure, /撤销所有/);
+    assert.match(disclosure, /写入和删除/);
+    assert.equal(f.calls.filter((x) => x.path === "upgrade").length, 0);
+    const edit = Array.from(
+      f.w.document.querySelectorAll<HTMLButtonElement>(
+        "#connection-list button",
+      ),
+    ).find((x) => x.textContent === "编辑")!;
+    edit.click();
+    assert.equal(
+      f.w.document.querySelector<HTMLElement>("#legacy-service-note")!.hidden,
+      false,
+    );
+    assert.equal(f.w.document.querySelector('[name="routes"]'), null);
+    f.w.document
+      .querySelector<HTMLButtonElement>("#connection-dialog [data-close]")!
+      .click();
+    f.w.confirm = () => true;
+    button().click();
+    await f.settle();
+    assert.equal(f.calls.filter((x) => x.path === "upgrade").length, 1);
+    assert.equal(button(), undefined);
+    assert.match(
+      f.w.document.querySelector("#connection-list")!.textContent!,
+      /服务级访问/,
+    );
   } finally {
     f.close();
   }

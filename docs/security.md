@@ -4,21 +4,23 @@
 
 The administrator, gateway runtime/host, configured HTTPS upstream, TLS trust store and filesystem are trusted. Agent code and request input are untrusted. Run agents under a separate OS identity or host; same-user filesystem/process access bypasses this gateway. The public admin interface is sensitive and requires HTTPS (or an authenticated local SSH tunnel).
 
-The gateway isolates provider keys and constrains network destinations, methods/routes, request counts and sizes. It does **not** validate business semantics, resource ownership, upstream billing costs or arbitrary URLs/SQL/scripts inside an upstream API request. Do not authorize upstream proxy, URL-fetch, credential-echo, script execution or administrative endpoints for untrusted agents. Each allowed route should receive the least-privilege upstream credential.
+The gateway isolates provider keys, authenticates access to configured services, and constrains network destinations, request counts and sizes. New service-level grants do not impose per-route or per-method business policies. It does **not** validate business semantics, resource ownership, upstream billing costs or arbitrary URLs/SQL/scripts inside an upstream API request. Service access includes every API operation available to the configured upstream key, including writes and deletion. Use provider-scoped keys/OAuth for business permissions. Do not give an untrusted agent service access to an upstream credential that can proxy arbitrary URLs, echo credentials, execute code or perform unacceptable administrative actions.
 
 ## Transport
 
-Services specify an HTTPS origin, without userinfo, path, query or fragment. Relative paths reject traversal, protocol-relative targets, backslashes, encoded separators/percent nesting, controls and ambiguous segments. Canonical exact/prefix policy matching uses path boundaries.
+Services specify an HTTPS origin, without userinfo, path, query or fragment. Relative paths reject traversal, protocol-relative targets, backslashes, encoded separators/percent nesting, controls and ambiguous segments. Legacy route policies still match canonical paths by exact/prefix boundaries; new services require no route policy.
 
 Every request resolves all available A/AAAA results. A single non-public answer rejects the request; IPv4 private/reserved and IPv6 local, mapped, transition and non-native-global ranges are blocked conservatively. The validated address is supplied to the actual TLS socket lookup. A fresh non-proxy HTTPS Agent prevents environment proxy and pooled-socket bypass. TLS still verifies the configured hostname. Redirects and protocol upgrades fail closed; no retries.
 
 Only server-approved, non-sensitive caller headers are rebuilt. Host, hop-by-hop, proxy, forwarding, cookie and authorization headers cannot be caller controlled. Header case duplicates and injection-field collisions are rejected. Server credential injection happens last. Query credential collisions are rejected case-insensitively. Request/body/target/header bytes and response bytes are bounded. A single deadline covers DNS, connect and response reads. Compressed responses are rejected rather than decompressed without a bound.
 
-The relay returns selected benign response headers, never cookies or Location. The whole buffered response and its headers are checked for the injected key and common encoded echoes; a match returns a sanitized failure. This is defense in depth for accidental echoes, **not a proof against a malicious provider inventing arbitrary encodings**. Arbitrary trusted-upstream responses may contain other sensitive information; limit service/grant routes accordingly.
+The relay returns selected benign response headers, never cookies or Location. The whole buffered response and its headers are checked for the injected key and common encoded echoes; a match returns a sanitized failure. This is defense in depth for accidental echoes, **not a proof against a malicious provider inventing arbitrary encodings**. Arbitrary trusted-upstream responses may contain other sensitive information; choose upstream credentials and service access accordingly.
 
 ## Policy, quota and audit
 
-Both service and grant policies must allow the HTTP method and canonical route. Empty routes grant no authority. Changing or deleting a service revokes its existing grants before file writes, including failed writes, preventing an old token from inheriting new routing or credentials.
+New v3 grants authenticate selected service IDs without a route/method allowlist. Unsupported tunnel/trace protocols, unsafe path/header forms and other transport guards remain blocked. Existing v2 grants keep their original route/method restrictions; malformed or unknown policy versions fail closed. A new v3 grant still cannot bypass a legacy service's retained route restrictions.
+
+Persisted old services without an access marker are read using the old deny-by-default behavior, including missing/empty routes. Ordinary service edits retain those restrictions. A dedicated CSRF-protected conversion action removes legacy restrictions only after explicit administrator confirmation in the UI, revokes every associated grant before saving, and does not mint replacement tokens. Failed conversion leaves restrictions intact and tokens revoked. Changing credentials/origin or deleting a service also revokes grants before file writes, including failed writes.
 
 Tokens are 256-bit random opaque values stored only as SHA-256 hashes. Expiry, revoke, per-grant total and UTC day limits, global UTC day limits and a fixed UTC-minute window are checked and committed in one SQLite IMMEDIATE transaction before network work. Fixed windows allow a boundary burst of up to twice the minute limit; use a conservative quota. Reserved requests count even when DNS, transport, upstream or response validation fails. There is no automatic refund because upstream billing may already have happened. One unit is one attempted relay call, not money.
 
@@ -30,7 +32,7 @@ The PR2 scrypt password hash, throttled verification, 30-minute memory sessions,
 
 Private files are written atomically with 0600 mode under private directories. Credentials are separate from config. Admin state never returns keys or token hashes; new grant tokens display once. Back up config, keys, password hash and a consistent SQLite snapshot securely. Never copy secrets into git, logs or a release directory.
 
-Legacy account settings and grant rows are retained. Legacy grants are unusable under the v2 relay. The migration does not generate a token, contact a provider or infer API authority. A later rollback to the old business-adapter release requires a compatibility plan after v2 configuration/grant changes; blindly restoring a stale database can revive access and reset quotas.
+Legacy account settings and grant rows are retained. Old business-operation grants remain unusable; route-scoped v2 relay grants remain restricted, while newly created v3 grants use service-level access. The migration does not generate a token, contact a provider or infer API authority. A later rollback to the old business-adapter release requires a compatibility plan after configuration/grant changes; blindly restoring a stale database can revive access and reset quotas.
 
 ## Operational limits
 

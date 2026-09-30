@@ -19,7 +19,8 @@ export type Service = {
   credential:
     | { type: "none" }
     | { type: "header" | "query"; name: string; prefix?: string };
-  routes: Route[];
+  access: "service" | "routes";
+  routes?: Route[];
   allowedHeaders: string[];
   timeoutMs: number;
   maxRequestBytes: number;
@@ -58,7 +59,7 @@ const integer = (value: unknown, min: number, max: number) =>
   Number.isSafeInteger(value) && Number(value) >= min && Number(value) <= max;
 const forbiddenHeader =
   /^(?:authorization|proxy-.*|host|cookie2?|set-cookie|connection|keep-alive|transfer-encoding|te|trailer|upgrade|content-length|expect|via|sec-.*|forwarded|x-forwarded-.*|x-real-ip|x-original-url|x-rewrite-url|x-http-method-override|x-http-method|x-method-override|accept-encoding)$/i;
-export function parseService(raw: unknown): Service {
+export function parseService(raw: unknown, legacyDefault = false): Service {
   if (
     !object(raw) ||
     Object.keys(raw).some(
@@ -67,6 +68,7 @@ export function parseService(raw: unknown): Service {
           "origin",
           "credential",
           "routes",
+          "access",
           "allowedHeaders",
           "timeoutMs",
           "maxRequestBytes",
@@ -106,10 +108,19 @@ export function parseService(raw: unknown): Service {
     )
       throw new Error("Invalid credential header");
   }
-  const routes = raw.routes ?? [];
+  // Old persisted services without a mode keep their previous deny-by-default semantics.
+  // New admin/API definitions default to whole-service access unless legacy routes are explicit.
+  const access =
+    raw.access ??
+    (legacyDefault || Object.hasOwn(raw, "routes") ? "routes" : "service");
+  if (access !== "service" && access !== "routes")
+    throw new Error("Invalid access mode");
+  if (access === "service" && Object.hasOwn(raw, "routes"))
+    throw new Error("Service access cannot contain routes");
+  const routes = access === "routes" ? (raw.routes ?? []) : undefined;
   const allowedHeaders = raw.allowedHeaders ?? ["accept", "content-type"];
   if (
-    !validRoutes(routes) ||
+    (access === "routes" && !validRoutes(routes)) ||
     !Array.isArray(allowedHeaders) ||
     allowedHeaders.length > 30 ||
     !allowedHeaders.every(
@@ -135,7 +146,8 @@ export function parseService(raw: unknown): Service {
   return {
     origin: raw.origin,
     credential: credential as Service["credential"],
-    routes,
+    access,
+    ...(access === "routes" ? { routes: routes as Route[] } : {}),
     allowedHeaders,
     timeoutMs: Number(timeoutMs),
     maxRequestBytes: Number(maxRequestBytes),
@@ -177,7 +189,7 @@ export function parseConfig(raw: unknown): Config {
   const services: Record<string, Service> = Object.create(null);
   for (const [id, service] of Object.entries(raw.services)) {
     if (!validName(id)) throw new Error("Invalid service id");
-    services[id] = parseService(service);
+    services[id] = parseService(service, true);
   }
   return {
     schemaVersion: 2,

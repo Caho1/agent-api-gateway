@@ -11,10 +11,10 @@ import {
 } from "./model.ts";
 import { canonicalPath, validRoutes, routeAllows } from "./path-policy.ts";
 export type Grant = {
-  schemaVersion: 2;
+  schemaVersion: 2 | 3;
   id: string;
   services: string[];
-  routes: Route[];
+  routes?: Route[];
   expiresAt: number;
   dailyUnits: number;
   totalUnits: number;
@@ -23,7 +23,7 @@ export type Grant = {
 export function validGrant(value: unknown): value is Grant {
   return (
     object(value) &&
-    value.schemaVersion === 2 &&
+    (value.schemaVersion === 2 || value.schemaVersion === 3) &&
     Object.keys(value).every((k) =>
       [
         "schemaVersion",
@@ -42,7 +42,9 @@ export function validGrant(value: unknown): value is Grant {
     value.services.length <= 100 &&
     value.services.every(validName) &&
     new Set(value.services).size === value.services.length &&
-    validRoutes(value.routes) &&
+    (value.schemaVersion === 2
+      ? validRoutes(value.routes)
+      : !Object.hasOwn(value, "routes")) &&
     Number.isSafeInteger(value.expiresAt) &&
     Number(value.expiresAt) > 0 &&
     [value.dailyUnits, value.totalUnits, value.perMinute].every(
@@ -149,6 +151,7 @@ export class Store {
           used: Number(row.used),
           dailyUsed,
           legacy: !valid,
+          restricted: valid && grant.schemaVersion === 2,
           status: row.revoked
             ? "revoked"
             : !valid
@@ -210,7 +213,8 @@ export class Store {
       if (grant.expiresAt <= now) throw new GatewayError(401, "unauthorized");
       if (
         !grant.services.includes(input.service) ||
-        !routeAllows(grant.routes, input.method, path)
+        (grant.schemaVersion === 2 &&
+          !routeAllows(grant.routes ?? [], input.method, path))
       )
         throw new GatewayError(403, "forbidden");
       if (Number(row.used) >= grant.totalUnits)

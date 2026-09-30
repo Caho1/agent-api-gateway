@@ -1,7 +1,7 @@
 // This calls a potentially billable upstream. Configure and explicitly authorize first.
 // TikHub source API: https://docs.tikhub.io/186826223e0
 // Service tikhub-demo: origin https://api.tikhub.io, header Authorization, prefix "Bearer ".
-// Both service and grant need exact GET /api/v1/douyin/app/v3/fetch_user_post_videos.
+// Grant the agent access to service tikhub-demo; no gateway route registration is required.
 const base = process.env.GATEWAY_URL ?? "http://127.0.0.1:8787";
 const token = process.env.GATEWAY_TOKEN;
 const secUserId = process.env.TIKHUB_SEC_USER_ID;
