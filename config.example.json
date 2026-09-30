@@ -1,0 +1,12 @@
+{
+  "accounts": {
+    "my-douyin": {
+      "provider": "tikhub",
+      "settings": {
+        "secUid": "REPLACE_WITH_OWN_ACCOUNT_SEC_UID",
+        "postIds": ["REPLACE_WITH_OWN_POST_ID"]
+      }
+    }
+  },
+  "globalDailyUnits": 100
+}

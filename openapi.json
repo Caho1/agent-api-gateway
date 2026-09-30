@@ -1,0 +1,224 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Agent API Gateway",
+    "version": "0.1.0",
+    "description": "Client-neutral local capability gateway. Describes built-in TikHub operations; additional trusted adapters must extend this schema. Bearer grants are local credentials, not OAuth."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8787"
+    }
+  ],
+  "security": [
+    {
+      "AgentGrant": []
+    }
+  ],
+  "paths": {
+    "/v1/invoke": {
+      "post": {
+        "operationId": "invokeCapability",
+        "summary": "Invoke one allowed operation; reserves one call unit before upstream work",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["operation", "account", "args"],
+                "properties": {
+                  "operation": {
+                    "type": "string",
+                    "enum": ["posts.list", "posts.metrics"]
+                  },
+                  "account": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z0-9_.-]{1,64}$"
+                  },
+                  "args": {
+                    "type": "object"
+                  }
+                },
+                "oneOf": [
+                  {
+                    "properties": {
+                      "operation": {
+                        "const": "posts.list"
+                      },
+                      "args": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "cursor": {
+                            "type": "string",
+                            "pattern": "^[0-9]{1,20}$"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "operation": {
+                        "const": "posts.metrics"
+                      },
+                      "args": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "postId": {
+                            "type": "string",
+                            "pattern": "^[0-9]{1,32}$"
+                          }
+                        },
+                        "required": ["postId"]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid, expired or revoked grant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Scope, origin, host, operation or account denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown route or method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request exceeds 8 KiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "JSON required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Quota exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream failed; reservation retained",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable; no fail-open",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Allowlisted adapter result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["requestId", "data"],
+                  "properties": {
+                    "requestId": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "AgentGrant": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Local grant token, not the provider key or OAuth"
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": ["requestId", "error"],
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "error": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
