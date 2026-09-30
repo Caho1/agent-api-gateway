@@ -3,7 +3,7 @@
   "info": {
     "title": "Agent API Gateway",
     "version": "0.3.0",
-    "description": "Generic authenticated HTTPS API relay; server-side origins and credentials, scoped service/method/path grants. No provider business adapters."
+    "description": "Generic authenticated HTTPS API relay; server-side origins and credentials, service-level Agent authorization. Paths and parameters follow upstream API documentation; no new route/method allowlist setup. Existing legacy restrictions remain enforced."
   },
   "servers": [
     {
@@ -62,7 +62,7 @@
             }
           },
           "403": {
-            "description": "Service/grant policy denied",
+            "description": "Service access denied or retained legacy route policy denied",
             "content": {
               "application/json": {
                 "schema": {
@@ -150,7 +150,7 @@
       "gatewayBearer": {
         "type": "http",
         "scheme": "bearer",
-        "description": "Scoped gateway token; never the upstream credential"
+        "description": "Service-scoped gateway token; never the upstream credential. New v3 grants use service-level access; legacy v2 grants retain route restrictions."
       }
     },
     "schemas": {

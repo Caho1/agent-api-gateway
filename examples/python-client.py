@@ -1,7 +1,7 @@
 """Potentially billable TikHub example; configure service/grant before running.
 Original API docs: https://docs.tikhub.io/186826223e0
 Service tikhub-demo uses https://api.tikhub.io and server-side Authorization: Bearer.
-Both route policies require exact GET /api/v1/douyin/app/v3/fetch_user_post_videos.
+Grant service tikhub-demo access; no gateway route registration is required.
 """
 import base64
 import json

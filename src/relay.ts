@@ -164,7 +164,10 @@ function prepare(input: Invocation, service: Service) {
   } catch {
     throw new GatewayError(400, "invalid_request");
   }
-  if (!routeAllows(service.routes, input.method, path))
+  if (
+    service.access !== "service" &&
+    !routeAllows(service.routes ?? [], input.method, path)
+  )
     throw new GatewayError(403, "forbidden");
   const query = new URLSearchParams();
   if (input.query !== undefined) {

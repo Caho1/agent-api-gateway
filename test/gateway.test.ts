@@ -68,9 +68,9 @@ test("legacy configuration is preserved with no inferred service authority", () 
   assert.deepEqual(next.legacyAccounts, old.accounts);
   assert.deepEqual(parseConfig(JSON.parse(JSON.stringify(next))), next);
   assert.throws(() => parseConfig({ ...next, schemaVersion: 3 }));
-  assert.deepEqual(
-    parseService({ origin: "https://api.example.com" }).routes,
-    [],
+  assert.equal(
+    parseService({ origin: "https://api.example.com" }).access,
+    "service",
   );
   for (const name of [
     "Host",

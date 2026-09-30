@@ -16,6 +16,7 @@ import { Relay, type RelayDependencies } from "../src/relay.ts";
 
 const secret = "FAKE_RELAY_SECRET_A/B+value=123456789";
 const service: Service = {
+  access: "routes",
   origin: "https://api.example.com",
   credential: { type: "header", name: "Authorization", prefix: "Bearer " },
   routes: [

@@ -533,3 +533,145 @@ test("legacy provider keys are preserved but never implicitly injected into gene
     await f.close();
   }
 });
+
+test("ordinary edits retain legacy restrictions; explicit conversion revokes both grant versions", async () => {
+  const f = await fixture();
+  try {
+    const session = await f.login(),
+      headers = { cookie: session.cookie, "x-csrf-token": session.csrf };
+    await f.send(
+      "/admin/api/connections",
+      { id: "mine", ...service, apiKey: secret },
+      headers,
+    );
+    const simplified = {
+      id: "mine",
+      origin: service.origin,
+      credential: service.credential,
+      apiKey: secret,
+    };
+    assert.equal(
+      (await f.send("/admin/api/connections", simplified, headers)).status,
+      200,
+    );
+    assert.equal(f.config.services.mine!.access, "routes");
+    assert.deepEqual(f.config.services.mine!.routes, routes);
+    assert.equal(
+      (
+        await f.send(
+          "/admin/api/connections",
+          { ...simplified, access: "service" },
+          headers,
+        )
+      ).status,
+      409,
+    );
+    const grant = {
+      schemaVersion: 3,
+      id: "full-agent",
+      services: ["mine"],
+      expiresAt: Date.now() + 60000,
+      dailyUnits: 3,
+      totalUnits: 4,
+      perMinute: 3,
+    };
+    const full = (await (
+      await f.send("/admin/api/grants", grant, headers)
+    ).json()) as { token: string };
+    const restricted = (await (
+      await f.send(
+        "/admin/api/grants",
+        { ...grant, schemaVersion: 2, id: "old-agent", routes },
+        headers,
+      )
+    ).json()) as { token: string };
+    assert.equal(
+      (
+        await f.send(
+          "/admin/api/connections/upgrade",
+          { id: "mine" },
+          { cookie: session.cookie },
+        )
+      ).status,
+      403,
+    );
+    assert.equal(
+      (await f.send("/admin/api/connections/upgrade", { id: "mine" }, headers))
+        .status,
+      200,
+    );
+    assert.equal(f.config.services.mine!.access, "service");
+    assert.equal(Object.hasOwn(f.config.services.mine!, "routes"), false);
+    assert.equal(f.settings.key("mine"), secret);
+    for (const token of [full.token, restricted.token])
+      assert.throws(
+        () => f.store.reserve(token, input, 100, "after-upgrade"),
+        /unauthorized/,
+      );
+    const state = (await (
+      await f.send("/admin/api/state", undefined, { cookie: session.cookie })
+    ).json()) as { adminAudit: { action: string }[] };
+    assert.ok(
+      state.adminAudit.some(
+        (x) => x.action === "connection_upgraded_to_service_access",
+      ),
+    );
+  } finally {
+    await f.close();
+  }
+});
+test("new admin service and grant require no routes; failed migration preserves restrictions and revokes tokens", async () => {
+  const f = await fixture();
+  try {
+    const session = await f.login(),
+      headers = { cookie: session.cookie, "x-csrf-token": session.csrf };
+    assert.equal(
+      (
+        await f.send(
+          "/admin/api/connections",
+          { id: "fresh", origin: "https://api.example.com" },
+          headers,
+        )
+      ).status,
+      200,
+    );
+    assert.equal(f.config.services.fresh!.access, "service");
+    const grant = {
+      schemaVersion: 3,
+      id: "fresh-agent",
+      services: ["fresh"],
+      expiresAt: Date.now() + 60000,
+      dailyUnits: 3,
+      totalUnits: 4,
+      perMinute: 3,
+    };
+    assert.equal(
+      (await f.send("/admin/api/grants", grant, headers)).status,
+      201,
+    );
+    await f.send("/admin/api/connections", { id: "mine", ...service }, headers);
+    const token = (
+      (await (
+        await f.send(
+          "/admin/api/grants",
+          { ...grant, id: "legacy-bound", services: ["mine"] },
+          headers,
+        )
+      ).json()) as { token: string }
+    ).token;
+    rmSync(join(f.directory, "config.json"));
+    mkdirSync(join(f.directory, "config.json"));
+    assert.equal(
+      (await f.send("/admin/api/connections/upgrade", { id: "mine" }, headers))
+        .status,
+      503,
+    );
+    assert.equal(f.config.services.mine!.access, "routes");
+    assert.throws(
+      () => f.store.reserve(token, input, 100, "failed-upgrade"),
+      /unauthorized/,
+    );
+  } finally {
+    await f.close();
+  }
+});

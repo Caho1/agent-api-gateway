@@ -43,9 +43,8 @@ Take an access-controlled, consistent backup of application state before the
 first migration, using SQLite's backup facility or a stopped-service copy. Do not
 copy a live SQLite file without its required consistency procedure. Grant tables
 are retained; legacy business-operation grants become non-executable migration
-records. Create fresh service/path-scoped grants through the admin panel as
-needed. Database changes are additive, but version-2 config and newly created
-grants are not understood by the old business-specific release. Immediate
+records. Create fresh service-level grants through the admin panel as
+needed. Database changes are additive. Existing route-scoped services and grants keep their restrictions; new v3 grants and explicit service access markers may not be understood by earlier releases. A dedicated confirmed conversion revokes old grants before removing a legacy service restriction. Immediate
 pre-activation rollback is supported; later rollback requires a compatible
 release or a separately reviewed migration. Never restore stale usage counters
 or revoked grants blindly from an old backup. Future destructive migrations
