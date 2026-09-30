@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+test "$(id -u)" -eq 0 || { echo "Run as root through a trusted SSH terminal."; exit 1; }
+test -t 0 || { echo "Use ssh -t for hidden password entry."; exit 1; }
+ADMIN_PASSWORD_HASH_FILE=/var/lib/agent-api-gateway/admin-password.hash
+export ADMIN_PASSWORD_HASH_FILE
+/opt/gateway-runtime/node-v24.21.0-linux-x64/bin/node /opt/agent-api-gateway/current/dist/setup-admin.js
+chown --reference=/var/lib/agent-api-gateway "$ADMIN_PASSWORD_HASH_FILE"
+chmod 600 "$ADMIN_PASSWORD_HASH_FILE"
+systemctl restart agent-api-gateway
+systemctl is-active agent-api-gateway
+echo "Admin login is now enabled at https://129.204.35.13/admin (username: admin)."

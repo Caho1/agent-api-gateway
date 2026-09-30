@@ -70,16 +70,23 @@ export class TikHub implements ProviderAdapter {
         throw new GatewayError(403, "forbidden");
     } else throw new GatewayError(400, "invalid_operation");
   }
-  private key: string;
+  private key: string | ((account: string) => string);
   private transport: Transport;
-  constructor(key: string, transport: Transport = fetch) {
+  constructor(
+    key: string | ((account: string) => string),
+    transport: Transport = fetch,
+  ) {
     this.key = key;
     this.transport = transport;
-    if (!key || key.startsWith("replace-"))
+    if (typeof key === "string" && (!key || key.startsWith("replace-")))
       throw new Error("Provider key required");
   }
   async invoke(input: Invocation, account: Account): Promise<unknown> {
     this.validate(input, account);
+    const key =
+      typeof this.key === "function" ? this.key(input.account) : this.key;
+    if (!key || key.startsWith("replace-"))
+      throw new GatewayError(503, "provider_not_configured");
     const config = settings(account);
     const url = new URL(
       input.operation === "posts.list"
@@ -111,7 +118,7 @@ export class TikHub implements ProviderAdapter {
       const response = await this.transport(url, {
         method: "GET",
         headers: {
-          Authorization: `Bearer ${this.key}`,
+          Authorization: `Bearer ${key}`,
           Accept: "application/json",
         },
         redirect: "error",
@@ -143,7 +150,7 @@ export class TikHub implements ProviderAdapter {
         throw new Error("schema");
       const clean = (value: unknown) =>
         typeof value === "string"
-          ? value.split(this.key).join("[REDACTED]").slice(0, 2000)
+          ? value.split(key).join("[REDACTED]").slice(0, 2000)
           : null;
       if (input.operation === "posts.list") {
         if (

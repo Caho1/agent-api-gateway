@@ -9,12 +9,12 @@
 
 ## 防护
 
-- 主密钥只从服务进程环境进入固定 TikHub Authorization 头；从不存入授权表
-- 客户端密钥随机 256 位，数据库保存摘要；高熵令牌使用 SHA-256，无密码登录或低熵密码支持
+- 主密钥从服务进程环境或仅写入的受保护凭证文件进入固定 TikHub Authorization 头；从不存入授权表或状态响应
+- 客户端密钥随机 256 位，数据库保存 SHA-256 摘要；管理员密码使用独立 scrypt 摘要，交互 SSH 初始化，短会话与登录节流
 - 授权校验与额度事务在每一次上游请求前执行；过期、撤销、作用域不足、数据库失败均不放行
 - SQLite BEGIN IMMEDIATE，日额度/总额度/全局日额度/预留审计一同提交；日额度按 UTC 重置
 - 当前 TikHub adapter：固定 GET 端点、严格查询参数、禁重定向、上游超时和字节上限；不允许任意 URL/header/method
-- HTTP 仅 IPv4 loopback，拒绝 Origin 和非 localhost/127.0.0.1 Host；不是远程访问认证方案
+- 应用 HTTP 仅 IPv4 loopback，拒绝非 localhost/127.0.0.1 Host；Agent API 拒绝 Origin。管理 API 单独校验精确可信 Origin、会话 cookie 与 CSRF，公开代理仅提供可信 HTTPS 的 /admin
 - 短请求正文、请求/headers 超时；固定错误码；列表文本中完整 provider key 替换为 [REDACTED]
 - 审计只保留请求 UUID、时间、授权 ID、工具、账户别名、reserved/succeeded/failed；不记录 token、参数、原始响应、标题
 
@@ -23,8 +23,8 @@
 - **本地任意代码执行不在防护范围。** 若 Agent 能读网关环境、修改配置/数据库或运行管理 CLI，它可以绕过网关。请隔离 OS 身份/容器权限并保护目录。不得把同一用户 shell 作为沙箱
 - 配置的作品 ID 由操作员核实归属；供应商的统计端点本身没有账户参数。恶意或错误管理员配置不受防护
 - 列表作品作者字段缺失或不同会 fail closed，可能影响兼容性；这不是已完成的真实账户契约验证
-- 身份只有本地 bearer grant，没有 OAuth/OIDC/MCP/浏览器登录；窃取能力令牌者可在其作用域和有效期内调用
-- 没有分布式/多机器支持，没有部署或 TLS 终止。不要公开端口或绕过 Host/Origin 限制来直接上线
+- Agent 身份为本地 bearer grant；管理面板为独立密码会话。没有 OAuth/OIDC/MCP，窃取能力令牌者可在其作用域和有效期内调用
+- 没有分布式/多机器支持。TLS 终止和 systemd 部署配置见 admin.md；不要绕过 Host/Origin 限制或将应用端口直接公开
 - 暂无完整请求速率/并发限流；额度限制付费尝试，不能独自防止本机 DoS
 - 审计记录授权后已预留的请求；未授权拒绝尚未持久审计。审计不签名、无自动保留期限，数据库会增长
 - 响应内容仍是不可信文本，客户端必须防提示注入；有限字段投影不是完整 DLP，网络/供应商/主机被入侵不在保证范围

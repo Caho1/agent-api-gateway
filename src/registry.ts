@@ -36,6 +36,12 @@ export class AdapterRegistry {
       adapter.validateAccount(account);
     }
   }
+  catalog() {
+    return [...this.adapters.values()].map((adapter) => ({
+      id: adapter.id,
+      operations: [...adapter.operations],
+    }));
+  }
   resolve(input: Invocation, account: Account) {
     const adapter = this.adapters.get(account.provider);
     if (!adapter || !adapter.operations.includes(input.operation))

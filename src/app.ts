@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { GatewayError, parseInvocation, type Config } from "./model.ts";
 import type { AdapterRegistry } from "./registry.ts";
 import type { Store } from "./store.ts";
+import type { Admin } from "./admin.ts";
 async function readBody(req: IncomingMessage) {
   if (
     !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(
@@ -27,6 +28,7 @@ export function createGateway(
   config: Config,
   store: Store,
   registry: AdapterRegistry,
+  admin?: Admin,
 ) {
   const server = createServer(async (req, res) => {
     const requestId = randomUUID();
@@ -41,11 +43,14 @@ export function createGateway(
     let reserved = false;
     try {
       // Local-only MVP: reject browser-origin requests and DNS-rebinding hosts.
-      if (
-        req.headers.origin ||
-        !/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(req.headers.host ?? "")
-      )
+      if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(req.headers.host ?? ""))
         throw new GatewayError(403, "forbidden");
+      if (admin && (await admin.handle(req, res, readBody))) return;
+      if (req.headers.origin) throw new GatewayError(403, "forbidden");
+      if (req.method === "GET" && req.url === "/healthz") {
+        send(200, { status: "ok" });
+        return;
+      }
       if (req.method !== "POST" || req.url !== "/v1/invoke")
         throw new GatewayError(404, "not_found");
       const authorization = req.headers.authorization;

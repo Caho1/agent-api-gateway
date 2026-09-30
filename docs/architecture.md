@@ -6,7 +6,7 @@ Agent → 本机 POST /v1/invoke → 严格 schema / Host / Origin 校验 → SQ
 
 客户端与供应商解耦：`AdapterRegistry` 选择已注册 adapter，核心只负责通用请求 envelope、授权、额度、审计；各 adapter 负责本地设置/参数校验、固定端点与响应投影。adapter 是可信本地代码，不是可由 Agent 上传的远程插件。
 
-可信操作员 → 本地 CLI → SQLite 授权创建/撤销；CLI 不经由 HTTP。
+可信操作员 → 本地 CLI 或认证后的 /admin → SQLite 授权创建/撤销。管理面板额外使用精确 Origin、短密码会话与 CSRF；CLI 不经由 HTTP。
 
 SQLite 单文件与 WAL 置于受保护目录。多进程使用同一文件时，`BEGIN IMMEDIATE` 串行化授权状态读取、全局/授权日额度、授权总额度与 reserved 审计写入。事务成功后才发上游请求。锁忙、磁盘故障、损坏或未知异常时返回 service_unavailable，不能绕过账本继续请求。不要使用不支持 SQLite 正确锁语义的网络共享盘。
 
@@ -23,7 +23,7 @@ Headers: Authorization: Bearer <agent-grant>；Content-Type 为 application/json
 
 成功：{"requestId":"UUID","data":...}。错误：{"requestId":"UUID","error":"固定代码"}。
 
-401 unauthorized；403 forbidden；400 invalid_request/invalid_arguments/invalid_json；413 request_too_large；415 json_required；429 quota_exceeded；502 upstream_unavailable；503 service_unavailable。未知路径或方法 404。当前没有开放健康检查或管理端点。
+401 unauthorized；403 forbidden；400 invalid_request/invalid_arguments/invalid_json；413 request_too_large；415 json_required；429 quota_exceeded；502 upstream_unavailable；503 service_unavailable。未知路径或方法 404。GET /healthz 提供最小本地进程健康响应；独立的 /admin 管理端点见 admin.md。
 
 ## TikHub 适配
 
@@ -44,4 +44,4 @@ Headers: Authorization: Bearer <agent-grant>；Content-Type 为 application/json
 4. 按官方/真实授权响应建立契约测试，再增加小红书独立只读 adapter；保留缺失指标，不制造数据
 5. 上线前增加并发限制、速率限制、持久审计归档、备份/恢复、供应商端额度与告警，必要时换 PostgreSQL 事务账本
 
-没有自动部署、注册 OAuth 应用、创建平台凭证或真实付费调用。
+提供明确的 systemd/Caddy 部署配置；不自动注册 OAuth 应用、创建平台凭证或执行真实付费调用。

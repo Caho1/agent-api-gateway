@@ -9,13 +9,14 @@
   "scripts": {
     "dev": "node --experimental-strip-types src/server.ts",
     "cli": "node --experimental-strip-types src/cli.ts",
+    "admin:password": "node --experimental-strip-types src/setup-admin.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit -p tsconfig.check.json",
     "lint": "eslint .",
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run build",
-    "format": "prettier --write src test examples/*.mjs *.json *.js README.md docs .github",
-    "format:check": "prettier --check src test examples/*.mjs *.json *.js README.md docs .github"
+    "format": "prettier --write src test web examples/*.mjs *.json *.js README.md docs .github",
+    "format:check": "prettier --check src test web examples/*.mjs *.json *.js README.md docs .github"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

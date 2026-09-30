@@ -56,7 +56,53 @@ export class Store {
     return token;
   }
   revoke(id: string) {
-    this.db.prepare("UPDATE grants SET revoked=1 WHERE id=?").run(id);
+    return (
+      this.db.prepare("UPDATE grants SET revoked=1 WHERE id=?").run(id)
+        .changes > 0
+    );
+  }
+  summary(now = Date.now()) {
+    const day = new Date(now).toISOString().slice(0, 10);
+    const grants = this.db
+      .prepare("SELECT id,policy,revoked,used FROM grants ORDER BY id")
+      .all()
+      .map((row) => {
+        const grant: unknown = JSON.parse(String(row.policy));
+        if (!validGrant(grant) || grant.id !== row.id)
+          throw new GatewayError(503, "service_unavailable");
+        const dailyUsed = Number(
+          this.db
+            .prepare("SELECT used FROM daily WHERE subject=? AND day=?")
+            .get("grant:" + grant.id, day)?.used ?? 0,
+        );
+        return {
+          ...grant,
+          revoked: Boolean(row.revoked),
+          used: Number(row.used),
+          dailyUsed,
+          status: row.revoked
+            ? "revoked"
+            : grant.expiresAt <= now
+              ? "expired"
+              : "active",
+        };
+      });
+    return {
+      day,
+      globalUsed: Number(
+        this.db
+          .prepare("SELECT used FROM daily WHERE subject='global' AND day=?")
+          .get(day)?.used ?? 0,
+      ),
+      grants,
+    };
+  }
+  audit(limit = 100) {
+    return this.db
+      .prepare(
+        "SELECT request_id,time,grant_id,operation,account,outcome FROM audit ORDER BY time DESC LIMIT ?",
+      )
+      .all(Math.min(200, Math.max(1, limit)));
   }
   reserve(
     token: string,

@@ -1,0 +1,33 @@
+[Unit]
+Description=Agent API Gateway control plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+User=agent-api-gateway
+StateDirectory=agent-api-gateway
+StateDirectoryMode=0700
+WorkingDirectory=/opt/agent-api-gateway/current
+EnvironmentFile=/etc/agent-api-gateway/gateway.env
+ExecStartPre=/opt/gateway-runtime/node-v24.21.0-linux-x64/bin/node /opt/agent-api-gateway/current/dist/initialize.js
+ExecStart=/opt/gateway-runtime/node-v24.21.0-linux-x64/bin/node /opt/agent-api-gateway/current/dist/server.js
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+MemoryMax=512M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
