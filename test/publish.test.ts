@@ -397,3 +397,59 @@ test("production unit keeps state identity and Caddy exposes only scoped routes"
   assert.match(caddy, /respond "Not found" 404/);
   assert.doesNotMatch(caddy, /tls_insecure_skip_verify|log \{|\/healthz/);
 });
+
+test("PM2 disables file sinks but still streams both log channels for journald", () => {
+  const directory = mkdtempSync(join(tmpdir(), "gateway-pm2-logging-test-"));
+  try {
+    const configPath = join(directory, "ecosystem.config.cjs");
+    cpSync(join(project, "ecosystem.config.cjs"), configPath);
+    writeFileSync(
+      join(directory, ".release.json"),
+      JSON.stringify({ revision: "a".repeat(40) }),
+    );
+    const result = spawnSync(
+      process.execPath,
+      [
+        "-e",
+        `
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const Utility = require("pm2/lib/Utility");
+const Log = require("pm2/lib/API/Log");
+const config = require(process.argv[1]);
+assert.equal(config.apps.length, 1);
+const app = config.apps[0];
+assert.equal(app.exec_mode, "fork");
+assert.equal(app.instances, 1);
+assert.equal(app.out_file, "/dev/null");
+assert.equal(app.error_file, "/dev/null");
+assert.notEqual(app.disable_logs, true);
+fs.createWriteStream = () => { throw new Error("A journal descriptor must not be reopened as a log file"); };
+Utility.startLogging({out: app.out_file, err: app.error_file}, (error) => {
+  assert.ifError(error);
+  const packet = {process: {name: app.name, pm_id: 0}, data: ""};
+  const bus = {on(event, receive) {
+    assert.equal(event, "log:*");
+    receive("out", {...packet, data: "gateway-fixture-stdout"});
+    receive("err", {...packet, data: "gateway-fixture-stderr"});
+  }};
+  const client = {launchBus(callback) {callback(null, bus, {on() {}});}};
+  Log.stream(client, "all", true, undefined, true);
+});
+`,
+        configPath,
+      ],
+      {
+        cwd: project,
+        encoding: "utf8",
+        timeout: 10_000,
+        env: { ...process.env, PM2_HOME: join(directory, "pm2") },
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "gateway-fixture-stdout\n");
+    assert.equal(result.stderr, "gateway-fixture-stderr\n");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

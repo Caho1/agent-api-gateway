@@ -121,6 +121,10 @@ from the unauthenticated smoke checks alone.
 - `systemctl status agent-api-gateway` checks the systemd/PM2 supervisor
 - `journalctl -u agent-api-gateway` contains process logs; avoid logging request
   bodies, authorization headers, provider credentials, or secret config
+- PM2 file sinks use `/dev/null`; `pm2-runtime` streams stdout/stderr log events
+  through its inherited descriptors into journald. Do not set `disable_logs: true`
+  or replace the file sinks with `/dev/stdout` or `/dev/stderr`: reopening a
+  journal socket as a regular log file can fail with `ENXIO` before the app starts
 - Local `GET /healthz` identifies the release SHA and schema version
 - An intentional republish of the already-running main SHA exits without restart
   only after checking activation and exact revision health; an interrupted
